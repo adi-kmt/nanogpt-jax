@@ -1,0 +1,13 @@
+[project]
+name = "nanogpt-jax"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "einops>=0.8.1",
+    "equinox>=0.13.0",
+    "jax>=0.7.0",
+    "jaxtyping>=0.3.2",
+    "pydantic>=2.11.7",
+    "pytest>=8.4.1",
+]
