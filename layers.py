@@ -6,7 +6,7 @@ from config import GPTConfig
 from jax import random
 
 activations = {
-    'relu2': lambda x: jnp.square(jnp.maximum(0, x) ** 2),
+    'relu2': lambda x: jnp.square(jnp.maximum(0, x)),
     'gelu': lambda x: jnp.array(0.5 * x * (1 + jax.lax.erf(x / jnp.sqrt(2.0)))),
     'silu': lambda x: x * jax.nn.sigmoid(x),  # also called SiLU
     'swish': lambda x: x * jax.nn.sigmoid(x),
@@ -44,16 +44,17 @@ class Linear(eqx.Module):
 class MLP(eqx.Module):
     layer1: Linear
     layer2: Linear
-    activation: eqx.field(static=True)
     dropout: eqx.nn.Dropout
+    activation_type: str = eqx.field(static=True)
 
     def __init__(self, config: GPTConfig, key: jax.random.PRNGKey):
         key1, key2 = jax.random.split(key)
         self.layer1 = Linear(config.d_model, config.linear_d_hidden, key=key1)
         self.layer2 = Linear(config.linear_d_hidden, config.d_model, key=key2)
-        self.activation = activations[config.activation_type]
+        self.activation_type = config.activation_type
         self.dropout = eqx.nn.Dropout(config.dropout_p)
 
     def __call__(self, x: Float[Array, "batch seq_len d_model"], inference: bool, key: jax.random.PRNGKey) -> Float[Array, "batch seq_len d_model"]:
-        x = self.dropout(self.activation(self.layer1(x)), key=key, inference=inference)
+        act_fn = activations[self.activation_type]
+        x = self.dropout(act_fn(self.layer1(x)), key=key, inference=inference)
         return self.layer2(x)

@@ -1,24 +1,32 @@
+from functools import partial
+
 import pytest
 import jax
 import jax.numpy as jnp
 import equinox as eqx
+from equinox import filter_grad
 from jax import random
-from typing import Optional
-from typing_extensions import Annotated
-from jaxtyping import Float, Int, Bool, Array
+import optax
 
 from attentions import MultiHeadAttention
-from layers import Linear, MLP
+from layers import Linear, MLP, activations
 from config import GPTConfig
 from nanogpt import DecoderBlock, NanoGPT
 from norms import RMSNorm, norm_without_weight
+from typing import Optional, Callable
+from dataclasses import replace
 
 Batch = 2
 SeqLen = 8
 DModel = 16
 NHeads = 4
+InFeatures = 8
+OutFeatures = 16
 DHead = DModel // NHeads
 
+@pytest.fixture
+def key():
+    return random.PRNGKey(42)
 
 @pytest.fixture
 def config():
@@ -46,53 +54,197 @@ def tree_all_close(a, b, rtol=1e-5, atol=1e-5):
         lambda x, y: jnp.allclose(x, y, rtol=rtol, atol=atol), a, b
     ))
 
-def test_linear_shapes():
-    key = random.PRNGKey(0)
-    linear = Linear(in_features=128, out_features=256, key=key)
+class TestActivations:
+    @pytest.fixture(params=list(activations.keys()))
+    def activation_name(self, request):
+        return request.param
 
-    x_2d = random.normal(key, (10, 128))  # seq_len, d_model
-    x_3d = random.normal(key, (4, 10, 128))  # batch, seq_len, d_model
+    def test_activation_output_shape(self, activation_name):
+        act_fn: Callable = activations[activation_name]
+        x = random.normal(random.PRNGKey(0), (10, 5))
+        y = act_fn(x)
+        assert y.shape == x.shape
 
-    assert linear(x_2d).shape == (10, 256)
-    assert linear(x_3d).shape == (4, 10, 256)
+    def test_activation_finite_output(self, activation_name):
+        act_fn: Callable = activations[activation_name]
+        x = random.normal(random.PRNGKey(0), (20,))
+        y = act_fn(x)
+        assert jnp.all(jnp.isfinite(y))
 
-def test_mlp_shapes():
-    key = random.PRNGKey(0)
-    key, k1 = random.split(key)
+    def test_relu(self):
+        x = jnp.array([-2.0, -1.0, 0.0, 1.0, 2.0])
+        expected = jnp.array([0.0, 0.0, 0.0, 1.0, 2.0])
+        assert jnp.allclose(activations["relu"](x), expected)
 
-    config = GPTConfig(
-        d_model=128,
-        linear_d_hidden=256,
-        activation_type='relu2',
-        dropout_p=0.1,
-        rms_eps=1e-5,
-        use_bias=True,
-        use_qkNorm=True,
-        use_rotary=True
-    )
+    def test_gelu(self):
+        x = jnp.array([0.0, 1.0, -1.0])
+        expected = 0.5 * x * (1 + jax.lax.erf(x / jnp.sqrt(2.0)))
+        assert jnp.allclose(activations["gelu"](x), expected, atol=1e-5)
 
-    mlp = MLP(config, key=k1)
+    def test_silu_swish_same(self):
+        x = random.normal(random.PRNGKey(0), (5,))
+        assert jnp.allclose(activations["silu"](x), activations["swish"](x), atol=1e-5)
 
-    seq_len, batch = 10, 4
-    d_model = config.d_model
+    def test_relu2(self):
+        x = jnp.array([-2.0, -1.0, 0.0, 1.0, 2.0])
+        # relu2(x) = (max(0, x))^2
+        expected = jnp.array([0.0, 0.0, 0.0, 1.0, 4.0])
+        assert jnp.allclose(activations["relu2"](x), expected)
 
-    # Test batched: (batch, seq_len, d_model)
-    x_batched = random.normal(key, (batch, seq_len, d_model))
-    out_batched = mlp(x_batched, key=key, inference=True)
+    def test_identity(self):
+        x = jnp.array([1.0, 2.0, 3.0])
+        assert jnp.allclose(activations["identity"](x), x)
 
-    assert out_batched.shape == (batch, seq_len, d_model), \
-        f"Batched output shape mismatch: {out_batched.shape} != {(batch, seq_len, d_model)}"
+    def test_gradient_flow(self, activation_name):
+        act_fn = activations[activation_name]
+        x = jnp.ones((3, 4)) * 0.1
 
-    # Test unbatched: (seq_len, d_model)
-    x_unbatched = random.normal(key, (seq_len, d_model))
-    out_unbatched = mlp(x_unbatched, key=key, inference=True)
+        def loss(x):
+            return jnp.sum(act_fn(x) ** 2)
 
-    assert out_unbatched.shape == (seq_len, d_model), \
-        f"Unbatched output shape mismatch: {out_unbatched.shape} != {(seq_len, d_model)}"
+        grad = jax.grad(loss)(x)
+        assert jnp.all(jnp.isfinite(grad))
+        assert grad.shape == x.shape
 
-    # Test finite output
-    assert jnp.all(jnp.isfinite(out_unbatched)), "MLP output contains NaN/inf"
-    assert jnp.all(jnp.isfinite(out_batched)), "MLP output contains NaN/inf"
+class TestLinear:
+    def test_initialization(self, key):
+        linear = Linear(InFeatures, OutFeatures, key=key, use_bias=True)
+        assert linear.weight.shape == (OutFeatures, InFeatures)
+        assert linear.bias is not None
+        assert linear.bias.shape == (OutFeatures,)
+
+        linear_no_bias = Linear(InFeatures, OutFeatures, key=key, use_bias=False)
+        assert linear_no_bias.bias is None
+
+    def test_forward_shape(self, key):
+        linear = Linear(InFeatures, OutFeatures, key=key, use_bias=True)
+        x = random.normal(key, (Batch, SeqLen, InFeatures))
+        y = linear(x)
+        assert y.shape == (Batch, SeqLen, OutFeatures)
+
+    def test_no_bias_forward(self, key):
+        linear = Linear(InFeatures, OutFeatures, key=key, use_bias=False)
+        x = random.normal(key, (3, 4, InFeatures))
+        y = linear(x)
+        assert y.shape == (3, 4, OutFeatures)
+        assert linear.bias is None
+
+    def test_numerical_correctness(self, key):
+        # Manually compute linear layer
+        key1, key2 = random.split(key)
+        weight = random.uniform(key1, (2, 3), minval=-0.5, maxval=0.5)
+        bias = random.uniform(key2, (2,), minval=-0.5, maxval=0.5)
+        linear = Linear(3, 2, key=key, use_bias=True)
+        linear = eqx.tree_at(lambda l: l.weight, linear, weight)
+        linear = eqx.tree_at(lambda l: l.bias, linear, bias)
+
+        x = jnp.array([[1.0, 2.0, 3.0]])
+        expected = jnp.einsum("bi,oi->bo", x, weight) + bias
+        y = linear(x)
+        assert jnp.allclose(y, expected, atol=1e-5)
+
+    def test_gradient_flow(self, key):
+        linear = Linear(InFeatures, OutFeatures, key=key, use_bias=True)
+        x = random.normal(key, (2, 3, InFeatures))
+
+        def loss(model, x):
+            return jnp.sum(model(x) ** 2)
+
+        grads = jax.grad(loss)(linear, x)
+        flat_grads, _ = jax.tree_util.tree_flatten(grads)
+        assert all(jnp.all(jnp.isfinite(g)) for g in flat_grads if isinstance(g, jnp.ndarray))
+
+    def test_jit_compilation(self, key):
+        linear = Linear(InFeatures, OutFeatures, key=key, use_bias=False)
+        x = random.normal(key, (2, 4, InFeatures))
+
+        @jax.jit
+        def forward(model, x):
+            return model(x)
+
+        y = forward(linear, x)
+        assert y.shape == (2, 4, OutFeatures)
+        assert jnp.all(jnp.isfinite(y))
+
+class TestMLP:
+    @pytest.mark.parametrize("activation_type", ["relu", "gelu", "silu", "swish", "relu2"])
+    def test_forward_shape(self, config, key, activation_type):
+        config = config.model_copy(update={"activation_type": activation_type})
+        mlp = MLP(config, key=key)
+        x = random.normal(key, (Batch, SeqLen, config.d_model))
+        key1, _ = random.split(key)
+        y = mlp(x, inference=False, key=key1)
+        assert y.shape == (Batch, SeqLen, config.d_model)
+
+    def test_inference_vs_training_dropout(self, config, key):
+        config = config.model_copy(update={"dropout_p": 0.5})
+        mlp = MLP(config, key=key)
+        x = random.normal(key, (2, 3, config.d_model))
+        key1, key2 = random.split(key)
+
+        y1 = mlp(x, inference=True, key=key1)
+        y2 = mlp(x, inference=True, key=key1)
+        assert jnp.allclose(y1, y2, atol=1e-5)
+
+        y3 = mlp(x, inference=False, key=key1)
+        y4 = mlp(x, inference=False, key=key2)
+        assert not jnp.allclose(y3, y4, atol=1e-5)
+
+    def test_zero_dropout(self, config, key):
+        config = config.model_copy(update={"dropout_p": 0.0})
+        mlp = MLP(config, key=key)
+        x = random.normal(key, (2, 4, config.d_model))
+        y1 = mlp(x, inference=False, key=key)
+        y2 = mlp(x, inference=False, key=key)
+        assert jnp.allclose(y1, y2, atol=1e-5)
+
+    def test_gradient_flow(self, config, key):
+        mlp = MLP(config, key=key)
+        x = random.normal(key, (2, 3, config.d_model))
+        key1, _ = random.split(key)
+
+        def loss(module, x, key):
+            return jnp.sum(module(x, inference=False, key=key) ** 2)
+
+        grads = filter_grad(loss)(mlp, x, key1)
+
+        # Check gradients are finite and exist
+        flat_grads, _ = jax.tree_util.tree_flatten(grads)
+        assert all(jnp.all(jnp.isfinite(g)) for g in flat_grads if isinstance(g, jnp.ndarray))
+
+    def test_jit_compilation(self, config, key):
+        mlp = MLP(config, key=key)
+        x = random.normal(key, (2, 4, config.d_model))
+        key1, _ = random.split(key)
+
+        @partial(jax.jit, static_argnames=['inference'])
+        def forward(module, x, key, inference):
+            return module(x, inference=inference, key=key)
+
+        y = forward(mlp, x, key1, inference=True)
+        assert y.shape == (2, 4, config.d_model)
+        assert jnp.all(jnp.isfinite(y))
+
+    def test_activation_applied_correctly(self, config, key):
+        config = config.model_copy(update={"activation_type": "relu"})
+        mlp = MLP(config, key=key)
+        x = -jnp.ones((1, 1, config.d_model))
+        y = mlp(x, inference=True, key=key)
+
+        h = activations[mlp.activation_type](mlp.layer1(x))
+        expected = mlp.layer2(h)
+        assert jnp.allclose(y, expected, atol=1e-5)
+
+        # Only assert on intermediate activation
+        assert jnp.all(h >= -1e-5)  # ReLU output should be non-negative
+
+    def test_identity_activation(self, config, key):
+        config = config.model_copy(update={"activation_type": "identity"})
+        mlp = MLP(config, key=key)
+        x = random.normal(key, (2, 3, config.d_model))
+        y = mlp(x, inference=True, key=key)
+        expected = mlp.layer2(mlp.layer1(x))
+        assert jnp.allclose(y, expected, atol=1e-5)
 
 class TestNormWithoutWeight:
     def test_basic_rms_norm(self):
@@ -130,7 +282,7 @@ class TestRMSNorm:
         norm = RMSNorm(config, key=None)
         assert norm.weight.shape == (config.d_model,)
         assert jnp.all(norm.weight == 1.0)
-        assert norm.eps == config.rms_eps
+        assert norm.eps == config.norm_eps
 
     def test_forward_shape(self, config, large_key):
         norm = RMSNorm(config, key=None)
@@ -146,7 +298,7 @@ class TestRMSNorm:
 
         # Manual: RMS norm
         mean_sq = jnp.mean(x ** 2, axis=-1, keepdims=True)  # (1, 2, 1)
-        inv_rms = jax.lax.rsqrt(mean_sq + config.rms_eps)  # (1, 2, 1)
+        inv_rms = jax.lax.rsqrt(mean_sq + config.norm_eps)  # (1, 2, 1)
 
         # Reshape weight to broadcast: (d_model,) -> (1, 1, d_model)
         weight = jnp.reshape(norm.weight, (1, 1, -1))  # (1, 1, d_model)
@@ -317,3 +469,146 @@ class TestMultiHeadAttention:
         y = forward(attn, x, mask, large_key)
         assert y.shape == (2, 5, config.d_model)
         assert jnp.all(jnp.isfinite(y))
+
+class TestDecoderBlock:
+    def test_initialization(self, config, key):
+        block = DecoderBlock(config, key=key)
+        assert isinstance(block.attn_norm, type(config.norm_eps))
+        assert isinstance(block.ffn_norm, type(config.norm_eps))
+        assert isinstance(block.attn, MultiHeadAttention)
+        assert isinstance(block.ffn, MLP)
+        assert block.config == config
+
+    def test_forward_pass_shape(self, config, key):
+        block = DecoderBlock(config, key=key)
+        x = jax.random.normal(key, (10, config.d_model))
+        key1, key2 = random.split(key, 2)
+        mask = jnp.tril(jnp.ones((10, 10), dtype=bool))
+        y = block(x, key=key2, mask=mask, inference=False)
+        assert y.shape == (10, config.d_model)
+
+    def test_residual_connections(self, config, key):
+        block = DecoderBlock(config, key=key)
+        x = jax.random.normal(key, (5, config.d_model))
+        key1, key2 = random.split(key, 2)
+        mask = jnp.tril(jnp.ones((5, 5), dtype=bool))
+        y = block(x, key=key2, mask=mask, inference=True)
+        # Residuals should preserve input shape and not zero it
+        assert not jnp.allclose(y, x, atol=1e-7)  # Should change
+        assert jnp.all(jnp.isfinite(y))  # Should be well-behaved
+
+    def test_inference_mode(self, config, key):
+        block = DecoderBlock(config, key=key)
+        x = jax.random.normal(key, (5, config.d_model))
+        key1, key2 = random.split(key, 2)
+        mask = jnp.tril(jnp.ones((5, 5), dtype=bool))
+
+        # Run in inference mode
+        y_inf = block(x, key=key2, mask=mask, inference=True)
+
+        # Run in training mode
+        y_train = block(x, key=key2, mask=mask, inference=False)
+
+        # Outputs might differ slightly due to dropout
+        if config.dropout > 0:
+            assert not jnp.allclose(y_inf, y_train, atol=1e-5)
+        else:
+            assert jnp.allclose(y_inf, y_train, atol=1e-5)
+
+class TestNanoGPT:
+    def test_initialization(self, config, key):
+        model = NanoGPT(config, key=key)
+        assert isinstance(model.wte, eqx.nn.Embedding)
+        assert len(model.blocks) == config.n_layers
+        assert isinstance(model.final_norm, RMSNorm)
+        assert isinstance(model.lm_head, Linear)
+        assert model.config == config
+
+    def test_tied_embeddings_initialization(self, tied_config, key):
+        model = NanoGPT(tied_config, key=key)
+        assert model.lm_head is None
+        assert isinstance(model.wte, eqx.nn.Embedding)
+
+    def test_forward_pass_shape(self, config, key):
+        model = NanoGPT(config, key=key)
+        input_ids = random.randint(key, (15,), 0, config.vocab_size)
+        logits = model(input_ids, key=key, inference=True)
+        assert logits.shape == (15, config.vocab_size)
+
+    def test_mask_is_applied(self, config, key):
+        model = NanoGPT(config, key=key)
+        input_ids = jnp.array([1, 2, 3, 4])
+        T = len(input_ids)
+
+        # Custom upper triangle mask (should block future tokens)
+        mask = jnp.tril(jnp.ones((T, T), dtype=bool))
+        logits_with_mask = model(input_ids, key=key, mask=mask, inference=True)
+
+        # Try with full mask (all allowed)
+        full_mask = jnp.ones((T, T), dtype=bool)
+        logits_full_mask = model(input_ids, key=key, mask=full_mask, inference=True)
+
+        # They should differ because causal masking restricts attention
+        assert not jnp.allclose(logits_with_mask, logits_full_mask, atol=1e-5)
+
+    def test_tied_embeddings_forward(self, tied_config, key):
+        model = NanoGPT(tied_config, key=key)
+        input_ids = random.randint(key, (10,), 0, tied_config.vocab_size)
+        logits = model(input_ids, key=key, inference=True)
+        assert logits.shape == (10, tied_config.vocab_size)
+
+        # Manually verify tied weights: wte.weight used in lm_head
+        expected_logits = jnp.einsum("t d, v d -> t v", model.wte(input_ids), model.wte.weight)
+        assert jnp.allclose(logits, expected_logits, atol=1e-5)
+
+    def test_deterministic_vs_randomized(self, config, key):
+        model = NanoGPT(config, key=key)
+        input_ids = random.randint(key, (8,), 0, config.vocab_size)
+
+        key1, key2 = random.split(key, 2)
+        out1 = model(input_ids, key=key1, inference=False)
+        out2 = model(input_ids, key=key2, inference=False)
+
+        # With dropout, different keys should give different outputs
+        if config.dropout > 0:
+            assert not jnp.allclose(out1, out2, atol=1e-5)
+        else:
+            assert jnp.allclose(out1, out2, atol=1e-5)
+
+    def test_inference_mode_stability(self, config, key):
+        model = NanoGPT(config, key=key)
+        input_ids = random.randint(key, (6,), 0, config.vocab_size)
+
+        # Multiple calls in inference mode should be deterministic
+        out1 = model(input_ids, key=key, inference=True)
+        out2 = model(input_ids, key=key, inference=True)
+        assert jnp.allclose(out1, out2, atol=1e-5)
+
+    def test_gradient_flow(self, config, key):
+        model = NanoGPT(config, key=key)
+        input_ids = random.randint(key, (5,), 0, config.vocab_size)
+        target = random.randint(key, (5,), 0, config.vocab_size)
+
+        def loss_fn(model):
+            logits = model(input_ids, key=key, inference=False)
+            return jnp.mean(optax.softmax_cross_entropy_with_integer_labels(logits, target))
+
+        grads = jax.grad(loss_fn)(model)
+        # Ensure gradients exist and are finite
+        assert eqx.filter_grads(lambda m: m)(model) is not None
+        flat_grads, _ = jax.tree_util.tree_flatten(grads)
+        assert all(jnp.all(jnp.isfinite(g)) for g in flat_grads if isinstance(g, jnp.ndarray))
+
+
+# --- Optional: Smoke test for JIT compilation ---
+def test_jit_compilation(config, key):
+    model = NanoGPT(config, key=key)
+    input_ids = random.randint(key, (7,), 0, config.vocab_size)
+
+    @jax.jit
+    def forward(model, x, key):
+        return model(x, key=key, inference=True)
+
+    logits = forward(model, input_ids, key)
+    assert logits.shape == (7, config.vocab_size)
+    assert jnp.all(jnp.isfinite(logits))

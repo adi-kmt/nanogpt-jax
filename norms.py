@@ -10,7 +10,7 @@ class RMSNorm(eqx.Module):
 
     def __init__(self, config: GPTConfig, key: jax.random.PRNGKey):
         self.weight = jnp.ones(config.d_model)
-        self.eps = config.rms_eps
+        self.eps = config.norm_eps
 
     def __call__(self, x: Float[Array, "batch seq_len d_model"]) -> Float[Array, "batch seq_len d_model"]:
         inv_rms = jax.lax.rsqrt(jnp.mean(jnp.square(x), axis=-1, keepdims=True) + self.eps)
