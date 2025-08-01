@@ -74,7 +74,7 @@ class MultiHeadAttention(eqx.Module):
     w_k: Linear
     w_v: Linear
     w_o: Linear
-    config: GPTConfig
+    config: GPTConfig = eqx.field(static=True)
     rotary: Rotary
 
     def __init__(self, config: GPTConfig, key: jax.random.PRNGKey):
@@ -84,7 +84,7 @@ class MultiHeadAttention(eqx.Module):
         self.w_k = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key2)
         self.w_v = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key3)
         self.w_o = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key4)
-        self.rotary = Rotary(dim=config.d_model, max_seq_len=config.max_seq_len)
+        self.rotary = Rotary(dim=config.d_head, max_seq_len=config.max_seq_len)
 
     def __call__(self, x: Float[Array, "batch seq_len d_model"], key: jax.random.PRNGKey,
                  mask: Bool[Array, "seq_len seq_len"]) -> Float[Array, "batch seq_len d_model"]:

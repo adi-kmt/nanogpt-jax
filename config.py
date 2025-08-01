@@ -10,9 +10,12 @@ class GPTConfig(BaseModel):
 
     linear_d_hidden: int
 
-    rms_eps: float
-
     use_bias: bool
     use_qkNorm: bool
     tie_word_embeddings: bool = True
     use_rotary:bool
+
+    n_heads: int
+    d_head: int
+    max_seq_len: int
+    norm_eps: float
