@@ -19,3 +19,5 @@ class GPTConfig(BaseModel):
     d_head: int
     max_seq_len: int
     norm_eps: float
+
+    n_layers: int

@@ -22,7 +22,7 @@ DModel = 16
 NHeads = 4
 InFeatures = 8
 OutFeatures = 16
-DHead = DModel // NHeads
+DHead = 4
 
 @pytest.fixture
 def key():
@@ -42,7 +42,8 @@ def config():
         use_rotary=False,
         max_seq_len=SeqLen,
         n_heads=NHeads,
-        d_head=DHead
+        d_head=DHead,
+        n_layers=2
     )
 
 @pytest.fixture
@@ -473,44 +474,39 @@ class TestMultiHeadAttention:
 class TestDecoderBlock:
     def test_initialization(self, config, key):
         block = DecoderBlock(config, key=key)
-        assert isinstance(block.attn_norm, type(config.norm_eps))
-        assert isinstance(block.ffn_norm, type(config.norm_eps))
+        assert isinstance(block.attn_norm, RMSNorm)
+        assert isinstance(block.ffn_norm, RMSNorm)
         assert isinstance(block.attn, MultiHeadAttention)
         assert isinstance(block.ffn, MLP)
         assert block.config == config
 
     def test_forward_pass_shape(self, config, key):
         block = DecoderBlock(config, key=key)
-        x = jax.random.normal(key, (10, config.d_model))
+        x = jax.random.normal(key, (1, 10, config.d_model))
         key1, key2 = random.split(key, 2)
         mask = jnp.tril(jnp.ones((10, 10), dtype=bool))
         y = block(x, key=key2, mask=mask, inference=False)
-        assert y.shape == (10, config.d_model)
+        assert y.shape == (1, 10, config.d_model)
 
     def test_residual_connections(self, config, key):
         block = DecoderBlock(config, key=key)
-        x = jax.random.normal(key, (5, config.d_model))
+        x = jax.random.normal(key, (1, 5, config.d_model))
         key1, key2 = random.split(key, 2)
         mask = jnp.tril(jnp.ones((5, 5), dtype=bool))
         y = block(x, key=key2, mask=mask, inference=True)
-        # Residuals should preserve input shape and not zero it
-        assert not jnp.allclose(y, x, atol=1e-7)  # Should change
-        assert jnp.all(jnp.isfinite(y))  # Should be well-behaved
+        assert not jnp.allclose(y, x, atol=1e-7)
+        assert jnp.all(jnp.isfinite(y))
 
     def test_inference_mode(self, config, key):
         block = DecoderBlock(config, key=key)
-        x = jax.random.normal(key, (5, config.d_model))
+        x = jax.random.normal(key, (1, 5, config.d_model))
         key1, key2 = random.split(key, 2)
         mask = jnp.tril(jnp.ones((5, 5), dtype=bool))
 
-        # Run in inference mode
         y_inf = block(x, key=key2, mask=mask, inference=True)
-
-        # Run in training mode
         y_train = block(x, key=key2, mask=mask, inference=False)
 
-        # Outputs might differ slightly due to dropout
-        if config.dropout > 0:
+        if config.dropout_p > 0:
             assert not jnp.allclose(y_inf, y_train, atol=1e-5)
         else:
             assert jnp.allclose(y_inf, y_train, atol=1e-5)
@@ -570,14 +566,14 @@ class TestNanoGPT:
         out2 = model(input_ids, key=key2, inference=False)
 
         # With dropout, different keys should give different outputs
-        if config.dropout > 0:
+        if config.dropout_p > 0:
             assert not jnp.allclose(out1, out2, atol=1e-5)
         else:
             assert jnp.allclose(out1, out2, atol=1e-5)
 
     def test_inference_mode_stability(self, config, key):
         model = NanoGPT(config, key=key)
-        input_ids = random.randint(key, (6,), 0, config.vocab_size)
+        input_ids = random.randint(key, (6,), 0, config.d_model)
 
         # Multiple calls in inference mode should be deterministic
         out1 = model(input_ids, key=key, inference=True)
@@ -586,8 +582,8 @@ class TestNanoGPT:
 
     def test_gradient_flow(self, config, key):
         model = NanoGPT(config, key=key)
-        input_ids = random.randint(key, (5,), 0, config.vocab_size)
-        target = random.randint(key, (5,), 0, config.vocab_size)
+        input_ids = random.randint(key, (5,), 0, config.d_model)
+        target = random.randint(key, (5,), 0, config.d_model)
 
         def loss_fn(model):
             logits = model(input_ids, key=key, inference=False)
@@ -595,7 +591,7 @@ class TestNanoGPT:
 
         grads = jax.grad(loss_fn)(model)
         # Ensure gradients exist and are finite
-        assert eqx.filter_grads(lambda m: m)(model) is not None
+        assert eqx.filter_grad(lambda m: m)(model) is not None
         flat_grads, _ = jax.tree_util.tree_flatten(grads)
         assert all(jnp.all(jnp.isfinite(g)) for g in flat_grads if isinstance(g, jnp.ndarray))
 

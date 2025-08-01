@@ -29,14 +29,14 @@ class DecoderBlock(eqx.Module):
         self.ffn = MLP(config, key=key2)
 
     def __call__(self,
-                 x: Float[Array, "seq_len d_model"],
+                 x: Float[Array, "batch seq_len d_model"],
                  key: jax.random.PRNGKey,
                  mask: Optional[Bool[Array, "seq_len seq_len"]] = None,
-                 inference: bool = False) -> Float[Array, "seq_len d_model"]:
+                 inference: bool = False) -> Float[Array, "batch seq_len d_model"]:
         key1, key2 = jax.random.split(key)
 
-        h = self.attn_norm(x)
-        h = self.attn(h, key=key1, mask=mask)
+        h = self.attn_norm(x)  # Now x is (B, T, D)
+        h = self.attn(h, key=key1, mask=mask)  # attn expects (B, T, D)
         x = x + h
 
         h = self.ffn_norm(x)
