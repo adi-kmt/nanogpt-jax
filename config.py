@@ -21,3 +21,5 @@ class GPTConfig(BaseModel):
     norm_eps: float
 
     n_layers: int
+
+    vocab_size: int

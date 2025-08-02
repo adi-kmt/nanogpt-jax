@@ -43,7 +43,27 @@ def config():
         max_seq_len=SeqLen,
         n_heads=NHeads,
         d_head=DHead,
-        n_layers=2
+        n_layers=2,
+        vocab_size=DModel
+    )
+
+@pytest.fixture
+def tied_config():
+    return GPTConfig(
+        activation_type="gelu",
+        dropout_p=0.1,
+        d_model=DModel,
+        linear_d_hidden=32,
+        norm_eps=1e-6,
+        use_bias=True,
+        use_qkNorm=False,
+        tie_word_embeddings=True,
+        use_rotary=False,
+        max_seq_len=SeqLen,
+        n_heads=NHeads,
+        d_head=DHead,
+        n_layers=2,
+        vocab_size=DModel  # <-- must equal d_model
     )
 
 @pytest.fixture
@@ -517,7 +537,10 @@ class TestNanoGPT:
         assert isinstance(model.wte, eqx.nn.Embedding)
         assert len(model.blocks) == config.n_layers
         assert isinstance(model.final_norm, RMSNorm)
-        assert isinstance(model.lm_head, Linear)
+        if not config.tie_word_embeddings:
+            assert isinstance(model.lm_head, Linear)
+        else:
+            assert model.lm_head is None
         assert model.config == config
 
     def test_tied_embeddings_initialization(self, tied_config, key):
@@ -527,45 +550,57 @@ class TestNanoGPT:
 
     def test_forward_pass_shape(self, config, key):
         model = NanoGPT(config, key=key)
-        input_ids = random.randint(key, (15,), 0, config.vocab_size)
+        input_ids = random.randint(key, (2, 10), 0, config.vocab_size)  # (B, T)
         logits = model(input_ids, key=key, inference=True)
-        assert logits.shape == (15, config.vocab_size)
+        assert logits.shape == (2, 10, config.vocab_size)  # (B, T, V)
 
     def test_mask_is_applied(self, config, key):
         model = NanoGPT(config, key=key)
-        input_ids = jnp.array([1, 2, 3, 4])
-        T = len(input_ids)
+        input_ids = jnp.array([[1, 2, 3, 4],
+                               [5, 6, 7, 8]])  # (2, 4)  # (1, 4) batched input
+        T = input_ids.shape[1]
 
-        # Custom upper triangle mask (should block future tokens)
-        mask = jnp.tril(jnp.ones((T, T), dtype=bool))
-        logits_with_mask = model(input_ids, key=key, mask=mask, inference=True)
+        # Causal mask
+        mask = jnp.tril(jnp.ones((T, T), dtype=bool))  # (4, 4)
 
-        # Try with full mask (all allowed)
+        # Full mask
         full_mask = jnp.ones((T, T), dtype=bool)
+
+        # Get logits
+        logits_with_mask = model(input_ids, key=key, mask=mask, inference=True)
         logits_full_mask = model(input_ids, key=key, mask=full_mask, inference=True)
 
-        # They should differ because causal masking restricts attention
+        # Outputs should differ due to masking
         assert not jnp.allclose(logits_with_mask, logits_full_mask, atol=1e-5)
 
     def test_tied_embeddings_forward(self, tied_config, key):
         model = NanoGPT(tied_config, key=key)
-        input_ids = random.randint(key, (10,), 0, tied_config.vocab_size)
+        input_ids = random.randint(key, (2, 10), 0, tied_config.vocab_size)  # (B, T)
         logits = model(input_ids, key=key, inference=True)
-        assert logits.shape == (10, tied_config.vocab_size)
+        assert logits.shape == (2, 10, tied_config.vocab_size)  # (B, T, V)
 
-        # Manually verify tied weights: wte.weight used in lm_head
-        expected_logits = jnp.einsum("t d, v d -> t v", model.wte(input_ids), model.wte.weight)
+        # Recompute forward pass up to final norm
+        x = jax.vmap(jax.vmap(model.wte))(input_ids)  # (B, T, D)
+        B, T = x.shape[:2]
+        mask = jnp.tril(jnp.ones((T, T), dtype=bool))
+
+        keys = jax.random.split(key, len(model.blocks))
+        for block, k in zip(model.blocks, keys):
+            x = block(x, key=k, mask=mask, inference=True)
+
+        x = model.final_norm(x)  # (B, T, D)
+
+        # Compute expected logits using tied weights
+        expected_logits = jnp.einsum("b t d, v d -> b t v", x, model.wte.weight)  # (B, T, V)
+
         assert jnp.allclose(logits, expected_logits, atol=1e-5)
 
     def test_deterministic_vs_randomized(self, config, key):
         model = NanoGPT(config, key=key)
-        input_ids = random.randint(key, (8,), 0, config.vocab_size)
-
+        input_ids = random.randint(key, (2, 8,), 0, config.vocab_size)
         key1, key2 = random.split(key, 2)
         out1 = model(input_ids, key=key1, inference=False)
         out2 = model(input_ids, key=key2, inference=False)
-
-        # With dropout, different keys should give different outputs
         if config.dropout_p > 0:
             assert not jnp.allclose(out1, out2, atol=1e-5)
         else:
@@ -573,38 +608,33 @@ class TestNanoGPT:
 
     def test_inference_mode_stability(self, config, key):
         model = NanoGPT(config, key=key)
-        input_ids = random.randint(key, (6,), 0, config.d_model)
-
-        # Multiple calls in inference mode should be deterministic
+        input_ids = random.randint(key, (1, 6,), 0, config.vocab_size)
         out1 = model(input_ids, key=key, inference=True)
         out2 = model(input_ids, key=key, inference=True)
         assert jnp.allclose(out1, out2, atol=1e-5)
 
     def test_gradient_flow(self, config, key):
         model = NanoGPT(config, key=key)
-        input_ids = random.randint(key, (5,), 0, config.d_model)
-        target = random.randint(key, (5,), 0, config.d_model)
+        input_ids = random.randint(key, (1, 5,), 0, config.vocab_size)
+        target = random.randint(key, (1, 5,), 0, config.vocab_size)
 
         def loss_fn(model):
+            # Use inference=False for dropout
             logits = model(input_ids, key=key, inference=False)
             return jnp.mean(optax.softmax_cross_entropy_with_integer_labels(logits, target))
 
-        grads = jax.grad(loss_fn)(model)
-        # Ensure gradients exist and are finite
-        assert eqx.filter_grad(lambda m: m)(model) is not None
+        # Add allow_int=True to allow integer inputs (input_ids), and handle bools
+        grads = eqx.filter_grad(loss_fn)(model)
+
         flat_grads, _ = jax.tree_util.tree_flatten(grads)
         assert all(jnp.all(jnp.isfinite(g)) for g in flat_grads if isinstance(g, jnp.ndarray))
 
-
-# --- Optional: Smoke test for JIT compilation ---
 def test_jit_compilation(config, key):
     model = NanoGPT(config, key=key)
-    input_ids = random.randint(key, (7,), 0, config.vocab_size)
-
+    input_ids = random.randint(key, (2, 7,), 0, config.vocab_size)
     @jax.jit
     def forward(model, x, key):
         return model(x, key=key, inference=True)
-
     logits = forward(model, input_ids, key)
-    assert logits.shape == (7, config.vocab_size)
+    assert logits.shape == (2, 7, config.vocab_size)
     assert jnp.all(jnp.isfinite(logits))

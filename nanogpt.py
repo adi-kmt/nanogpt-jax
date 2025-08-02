@@ -49,36 +49,43 @@ class NanoGPT(eqx.Module):
     wte: eqx.nn.Embedding
     blocks: list[DecoderBlock]
     final_norm: RMSNorm
-    lm_head: Linear
+    lm_head: Optional[Linear]
     config: GPTConfig = eqx.static_field()
 
     def __init__(self, config: GPTConfig, key: jax.random.PRNGKey):
         self.config = config
         key, *subkeys = jax.random.split(key, 1 + config.n_layers + 1)
 
-        self.wte = eqx.nn.Embedding(config.vocab_size, config.d_model, key=subkeys[0])
-
+        self.wte = eqx.nn.Embedding(
+            config.vocab_size, config.d_model, key=subkeys[0]
+        )
         self.blocks = [
-            DecoderBlock(config, key=subkeys[i+1]) for i in range(config.n_layers)
+            DecoderBlock(config, key=subkeys[i + 1]) for i in range(config.n_layers)
         ]
-
         self.final_norm = RMSNorm(config, key=None)
 
         if not config.tie_word_embeddings:
-            self.lm_head = Linear(config.d_model, config.vocab_size, key=subkeys[-1], use_bias=False)
+            self.lm_head = Linear(
+                config.d_model,
+                config.vocab_size,
+                key=subkeys[-1],
+                use_bias=False
+            )
         else:
             self.lm_head = None
 
-    def __call__(self,
-                 input_ids: Int[Array, "seq_len"],
-                 key: jax.random.PRNGKey,
-                 mask: Optional[Bool[Array, "seq_len seq_len"]] = None,
-                 inference: bool = True) -> Float[Array, "seq_len vocab_size"]:
-        x = self.wte(input_ids)
+    def __call__(
+        self,
+        input_ids: Int[Array, "batch seq_len"],
+        key: jax.random.PRNGKey,
+        mask: Optional[Bool[Array, "seq_len seq_len"]] = None,
+        inference: bool = True,
+    ) -> Float[Array, "batch seq_len vocab_size"]:
+        x = jax.vmap(jax.vmap(self.wte))(input_ids)
 
+        B, T = x.shape[:2]
         if mask is None:
-            T = x.shape[0]
-            mask = jnp.tril(jnp.ones((T, T), dtype=bool))  # [T, T]
+            mask = jnp.tril(jnp.ones((T, T), dtype=bool))
 
         keys = jax.random.split(key, len(self.blocks))
         for block, k in zip(self.blocks, keys):
@@ -87,9 +94,8 @@ class NanoGPT(eqx.Module):
         x = self.final_norm(x)
 
         if self.config.tie_word_embeddings:
-            logits = jnp.einsum("t d, v d -> t v", x, self.wte.weight)
+            logits = jnp.einsum("b t d, v d -> b t v", x, self.wte.weight)
         else:
             logits = self.lm_head(x)
 
         return logits
-
