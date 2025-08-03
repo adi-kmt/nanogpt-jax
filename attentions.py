@@ -12,8 +12,8 @@ from norms import norm_without_weight
 class Rotary(eqx.Module):
     cos: jax.Array
     sin: jax.Array
-    dim: int = eqx.static_field()
-    max_seq_len: int = eqx.static_field()
+    dim: int = eqx.field(static=True)
+    max_seq_len: int = eqx.field(static=True)
 
     def __init__(self, dim: int, max_seq_len: int):
         self.dim = dim

@@ -9,7 +9,7 @@ import optax
 
 from jaxtyping import PRNGKeyArray
 from config import GPTConfig, TrainingConfig
-from nanogpt import init_model_weights, NanoGPT, debug_model_weights
+from nanogpt import init_model_weights, NanoGPT, debug_model_init
 from data_utils import create_dataloader, setup_sharding
 
 
@@ -131,7 +131,7 @@ def train_distributed_safe(model_config: GPTConfig, config: TrainingConfig):
 
     # Create model with safer initialization
     model = create_safer_model(model_config, key_model)
-    debug_model_weights(model, step=0)
+    debug_model_init(model, model_config)
 
     # Rest of training setup...
     num_devices = jax.device_count()
@@ -188,7 +188,7 @@ def train_distributed_safe(model_config: GPTConfig, config: TrainingConfig):
 
         # Check model health less frequently
         if step % 500 == 0:
-            debug_model_weights(model, step)
+            debug_model_init(model, model_config)
 
         batch_data, iterator_exhausted = fetch_batch_data(train_iter, config.grad_accum_steps)
 
