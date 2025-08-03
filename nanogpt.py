@@ -99,3 +99,60 @@ class NanoGPT(eqx.Module):
             logits = self.lm_head(x)
 
         return logits
+
+
+def init_model_weights(model, key, config):
+    """Fixed weight initialization - less conservative."""
+    keys = jax.random.split(key, len(jax.tree_util.tree_leaves(model, is_leaf=eqx.is_array)))
+    key_iter = iter(keys)
+
+    def init_leaf(path, leaf):
+        if not isinstance(leaf, jnp.ndarray) or leaf.ndim < 2:
+            return leaf
+
+        path_names = [p.name for p in path if isinstance(p, jax.tree_util.GetAttrKey)]
+        shape = leaf.shape
+        k = next(key_iter)
+
+        # Better initialization scaling
+        if 'w_out' in path_names or 'output' in path_names:
+            # Output projection - small but not tiny
+            scale = 0.1
+        elif 'c_proj' in path_names or 'proj' in path_names:
+            # Residual connection scaling
+            scale = 0.02 / jnp.sqrt(config.n_layers)
+        elif 'wte' in path_names or 'wpe' in path_names:
+            # Embedding scaling - standard
+            scale = 0.02
+        elif 'ln' in path_names or 'norm' in path_names:
+            # Layer norm - initialize to ones for weights, zeros for bias
+            if 'weight' in path_names or 'scale' in path_names:
+                return jnp.ones(shape)
+            else:
+                return jnp.zeros(shape)
+        else:
+            # General linear layers - proper Xavier/Glorot
+            fan_in = shape[-2] if len(shape) >= 2 else shape[-1]
+            fan_out = shape[-1] if len(shape) >= 2 else shape[-1]
+            scale = jnp.sqrt(2.0 / (fan_in + fan_out))  # Xavier initialization
+
+        return jax.random.normal(k, shape) * scale
+
+    return jax.tree_util.tree_map_with_path(init_leaf, model)
+
+
+def debug_model_weights(model, step=0):
+    """Debug function to check for problematic weights."""
+    leaves = jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array))
+
+    for i, leaf in enumerate(leaves):
+        if jnp.any(jnp.isnan(leaf)):
+            jax.debug.print(f"⚠️  NaN found in parameter {i} at step {step}")
+        if jnp.any(jnp.isinf(leaf)):
+            jax.debug.print(f"⚠️  Inf found in parameter {i} at step {step}")
+        if jnp.max(jnp.abs(leaf)) > 100:
+            jax.debug.print(
+                f"⚠️  Large weights found in parameter {i}: max={jnp.max(jnp.abs(leaf)):.3f} at step {step}")
+
+    max_weight = max(jnp.max(jnp.abs(leaf)) for leaf in leaves)
+    print(f"📊 Step {step}: Max weight magnitude: {max_weight:.4f}")

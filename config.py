@@ -23,3 +23,16 @@ class GPTConfig(BaseModel):
     n_layers: int
 
     vocab_size: int
+
+class TrainingConfig(BaseModel):
+    batch_size: int
+    micro_batch_size: int
+    eval_batch_size: int
+    epochs: int
+    lr: float
+    weight_decay: float
+    warmup_steps: int
+    max_grad_norm: float
+    optimizer: Literal["adam", "adamw"]
+    scheduler: Literal["cosine", "linear"]
+    grad_accum_steps: int
