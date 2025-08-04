@@ -102,103 +102,98 @@ class NanoGPT(eqx.Module):
 
 
 def init_model_weights(model, key, config):
-    """Initialize model weights with proper scaling for different layer types.
-
-    Args:
-        model: The model to initialize
-        key: JAX PRNGKey
-        config: Model configuration (must contain d_model, n_heads, n_layers, etc.)
-
-    Returns:
-        Model with properly initialized weights
-    """
-    # Partition model into parameters and other parts
+    """Initialize model weights with proper scaling for deep networks - DEEP FIXED VERSION"""
     params, others = eqx.partition(model, eqx.is_array)
 
-    # Create keys for each parameter
     keys = jax.random.split(key, len(jax.tree_util.tree_leaves(params)))
     key_iter = iter(keys)
 
-    # Precompute useful dimensions
     d_model = config.d_model
-    d_head = d_model // config.n_heads
+    n_layers = config.n_layers
+
+    # ✅ CRITICAL: Depth-aware scaling factors
+    depth_scale = 1.0 / jnp.sqrt(n_layers)  # Scale down with depth
+    residual_scale = 0.5 / jnp.sqrt(n_layers)  # Even smaller for residual connections
 
     def init_param(path, param):
         """Initialize a single parameter based on its path."""
-        k = next(key_iter)
         shape = param.shape
         path_names = [p.name for p in path if isinstance(p, jax.tree_util.GetAttrKey)]
 
-        print(f"DEBUG: Full path: {path}")
-        print(f"DEBUG: Path names: {path_names}")
         print(f"Initializing {path_names} with shape {shape}")
 
-        # Embeddings (token and positional)
-        if 'wte' in path_names or 'wpe' in path_names:
-            result = jax.random.normal(k, shape) * 0.02
-            print(f"DEBUG: Embedding init - original mean: {jnp.mean(param):.6f}, new mean: {jnp.mean(result):.6f}")
-            return result
-
-        # Biases (always zero)
-        elif 'bias' in path_names:
-            return jnp.zeros(shape)
-
-        # Normalization layers
-        elif any(n in path_names for n in ['attn_norm', 'ffn_norm', 'final_norm']):
-            if 'weight' in path_names:  # Scale parameter
-                return jnp.ones(shape)
-            return jnp.zeros(shape)  # Shouldn't happen
-
-        # Rotary embeddings (leave as-is)
-        elif 'rotary' in path_names:
+        if 'rotary' in path_names:
+            print(f"  -> Keeping precomputed RoPE values")
             return param
 
-        # Attention projections (Q, K, V)
-        elif 'w_q' in path_names or 'w_k' in path_names or 'w_v' in path_names:
-            scale = 1.0 / jnp.sqrt(d_head)
-            return jax.random.normal(k, shape) * scale
+        k = next(key_iter)
 
-            # Attention output projection
+        if 'wte' in path_names or 'wpe' in path_names:
+            std = 0.01 * depth_scale  # Much smaller for deep networks
+            result = jax.random.normal(k, shape) * std
+            print(f"  -> Embedding: std={std:.5f}")
+            return result
+
+        elif 'bias' in path_names:
+            print(f"  -> Bias: zeros")
+            return jnp.zeros(shape)
+
+        elif any(n in path_names for n in ['attn_norm', 'ffn_norm', 'final_norm']):
+            if 'weight' in path_names:
+                print(f"  -> Norm weight: ones")
+                return jnp.ones(shape)
+            return jnp.zeros(shape)
+
+        elif any(w in path_names for w in ['w_q', 'w_k', 'w_v']):
+            # Use much smaller initialization for deep networks
+            fan_in = shape[-2]
+            std = (0.02 / jnp.sqrt(fan_in)) * depth_scale
+            result = jax.random.normal(k, shape) * std
+            print(f"  -> QKV: std={std:.6f} (depth_scale={depth_scale:.3f})")
+            return result
+
         elif 'w_o' in path_names:
-            scale = 1.0 / jnp.sqrt(d_model)
-            return jax.random.normal(k, shape) * scale
+            fan_in = shape[-2]
+            std = (0.01 / jnp.sqrt(fan_in)) * residual_scale
+            result = jax.random.normal(k, shape) * std
+            print(f"  -> Output proj: std={std:.6f} (residual_scale={residual_scale:.3f})")
+            return result
 
-        # MLP up-projection
-        elif 'layer1' in path_names:  # up-projection (usually d_model -> 4*d_model)
-            scale = 1.0 / jnp.sqrt(d_model)
-            return jax.random.normal(k, shape) * scale
+        elif 'layer1' in path_names:
+            fan_in, fan_out = shape[-2], shape[-1]
+            std = jnp.sqrt(2.0 / fan_in) * depth_scale * 0.5
+            result = jax.random.normal(k, shape) * std
+            print(f"  -> MLP layer1: std={std:.6f}")
+            return result
 
-        # MLP down-projection
-        elif 'layer2' in path_names:  # down-projection (usually 4*d_model -> d_model)
-            scale = 1.0 / jnp.sqrt(config.linear_d_hidden)
-            return jax.random.normal(k, shape) * scale
+        elif 'layer2' in path_names:
+            fan_in = shape[-2]
+            std = (0.01 / jnp.sqrt(fan_in)) * residual_scale
+            result = jax.random.normal(k, shape) * std
+            print(f"  -> MLP layer2: std={std:.6f} (residual)")
+            return result
 
-        # LM Head
         elif 'lm_head' in path_names and 'weight' in path_names:
             if config.tie_word_embeddings:
-                return param  # Will be tied to embeddings
-            return jax.random.normal(k, shape) * 0.02
+                return param
+            std = 0.01 * depth_scale
+            result = jax.random.normal(k, shape) * std
+            print(f"  -> LM head: std={std:.5f}")
+            return result
 
-        # Fallback for other matrices (convolutional layers, etc.)
         if len(shape) >= 2:
             fan_in = shape[-2]
-            scale = 1.0 / jnp.sqrt(fan_in)
-            return jax.random.normal(k, shape) * scale
+            std = (0.01 / jnp.sqrt(fan_in)) * depth_scale
+            result = jax.random.normal(k, shape) * std
+            print(f"  -> Fallback: std={std:.6f}")
+            return result
 
-        # Fallback for scalars and other params
+        print(f"  -> Zeros fallback")
         return jnp.zeros(shape)
 
-    # Apply initialization to all parameters
-    # new_params = jax.tree_util.tree_map_with_path(init_param, params)
-    #
-    # # Combine back with non-parameter parts
-    # new_model = eqx.combine(new_params, others)
-
-    new_model = jax.tree_util.tree_map_with_path(
-        lambda path, x: init_param(path, x) if eqx.is_array(x) else x,
-        model
-    )
-
+    # Apply initialization
+    new_params = jax.tree_util.tree_map_with_path(init_param, params)
+    new_model = eqx.combine(new_params, others)
     return new_model
 
 

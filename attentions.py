@@ -88,33 +88,53 @@ class MultiHeadAttention(eqx.Module):
 
     def __call__(self, x: Float[Array, "batch seq_len d_model"], key: jax.random.PRNGKey,
                  mask: Bool[Array, "seq_len seq_len"]) -> Float[Array, "batch seq_len d_model"]:
-        q = self.w_q(x)
-        k = self.w_k(x)
-        v = self.w_v(x)
 
-        q = rearrange(q, "b s (h k) -> b h s k", h=self.config.n_heads, k=self.config.d_head)
-        k = rearrange(k, "b s (h k) -> b h s k", h=self.config.n_heads, k=self.config.d_head)
-        v = rearrange(v, "b s (h k) -> b h s k", h=self.config.n_heads, k=self.config.d_head)
+        # Project to Q, K, V
+        q = self.w_q(x)  # [B, S, D]
+        k = self.w_k(x)  # [B, S, D]
+        v = self.w_v(x)  # [B, S, D]
 
+        # Reshape to BTHD format (Batch, Time, Heads, Dim_head)
+        q = rearrange(q, "b t (h d) -> b t h d", h=self.config.n_heads, d=self.config.d_head)
+        k = rearrange(k, "b t (h d) -> b t h d", h=self.config.n_heads, d=self.config.d_head)
+        v = rearrange(v, "b t (h d) -> b t h d", h=self.config.n_heads, d=self.config.d_head)
+
+        # Apply QK normalization if enabled
         if self.config.use_qkNorm:
             q = norm_without_weight(q, self.config.norm_eps)
             k = norm_without_weight(k, self.config.norm_eps)
 
+        # Apply rotary embeddings if enabled (now expects BTHD format)
         if self.config.use_rotary:
-            q = self.rotary(q)
-            k = self.rotary(k)
+            q = self.rotary(q)  # [B, T, H, D]
+            k = self.rotary(k)  # [B, T, H, D]
 
-        attn_scores = jnp.einsum('b h s k, b h t k -> b h s t', q, k)
+        # Compute attention scores: [B, H, S, S]
+        # Need to transpose for einsum: BTHD -> BHTD
+        q_transposed = jnp.transpose(q, (0, 2, 1, 3))  # [B, H, T, D]
+        k_transposed = jnp.transpose(k, (0, 2, 1, 3))  # [B, H, T, D]
+        v_transposed = jnp.transpose(v, (0, 2, 1, 3))  # [B, H, T, D]
+
+        attn_scores = jnp.einsum('b h s d, b h t d -> b h s t', q_transposed, k_transposed)
         attn_scores = attn_scores / jnp.sqrt(self.config.d_head)
 
+        # Apply causal mask
         if mask is not None:
-            mask = jnp.expand_dims(mask, (0, 1))
+            # Expand mask to [B, H, S, S] format
+            mask = jnp.expand_dims(mask, (0, 1))  # [1, 1, S, S]
             attn_scores = jnp.where(mask, attn_scores, -jnp.inf)
 
+        # Apply softmax
         attn_weights = jax.nn.softmax(attn_scores, axis=-1)
 
-        out = jnp.einsum('b h s t, b h t k -> b h s k', attn_weights, v)
-        out = rearrange(out, "b h s k -> b s (h k)", h=self.config.n_heads, k=self.config.d_head)
+        # Apply attention to values: [B, H, S, D_head]
+        out = jnp.einsum('b h s t, b h t d -> b h s d', attn_weights, v_transposed)
+
+        # Transpose back to [B, S, H, D] then reshape to [B, S, D]
+        out = jnp.transpose(out, (0, 2, 1, 3))  # [B, S, H, D]
+        out = rearrange(out, "b s h d -> b s (h d)", h=self.config.n_heads, d=self.config.d_head)
+
+        # Final output projection
         out = self.w_o(out)
 
         return out

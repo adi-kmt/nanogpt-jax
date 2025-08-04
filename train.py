@@ -149,9 +149,10 @@ def train_distributed_safe(model_config: GPTConfig, config: TrainingConfig):
     # Better optimizer settings
     optimizer = optax.chain(
         optax.clip_by_global_norm(config.max_grad_norm),
-        optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-8),  # Standard Adam params
-        optax.add_decayed_weights(config.weight_decay),
+        optax.add_decayed_weights(config.weight_decay),  # Move this before Adam
+        optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-8),
         optax.scale_by_schedule(lr_schedule),
+        optax.scale(-1.0)  # Add this for gradient descent
     )
 
     opt_state = optimizer.init(model)
@@ -244,14 +245,14 @@ if __name__ == "__main__":
         linear_d_hidden=1024,
         norm_eps=1e-5,
         use_bias=True,
-        use_qkNorm=False,
+        use_qkNorm=True,
         tie_word_embeddings=False,
         use_rotary=True,
         max_seq_len=64,
         n_heads=16,
         d_head=32,
-        n_layers=12,  # Fewer layers for easier training
-        vocab_size=50257,  # Proper GPT-2 vocab size
+        n_layers=12,
+        vocab_size=50257,
     )
 
     train_config = TrainingConfig(
