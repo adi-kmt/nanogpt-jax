@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -17,12 +17,18 @@ class GPTConfig(BaseModel):
 
     n_heads: int
     d_head: int
+    n_kv_heads: Optional[int] = None
     max_seq_len: int
     norm_eps: float
 
     n_layers: int
 
     vocab_size: int
+
+    class MhlaConfig(BaseModel):
+        d_c: int
+        d_c1: int
+        d_r: int
 
 class TrainingConfig(BaseModel):
     batch_size: int
@@ -33,6 +39,6 @@ class TrainingConfig(BaseModel):
     weight_decay: float
     warmup_steps: int
     max_grad_norm: float
-    optimizer: Literal["adam", "adamw"]
-    scheduler: Literal["cosine", "linear"]
+    optimizer: Literal["adam", "adamw", "muon"]
+    scheduler: Literal["cosine", "linear"] | None
     grad_accum_steps: int

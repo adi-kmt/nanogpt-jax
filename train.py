@@ -127,8 +127,6 @@ def train_distributed_safe(model_config: GPTConfig, config: TrainingConfig):
 
     data_sharding = setup_sharding()
 
-    # Better model config - smaller for debugging
-
     # Create model with safer initialization
     model = create_safer_model(model_config, key_model)
     debug_model_init(model, model_config)
@@ -169,12 +167,9 @@ def train_distributed_safe(model_config: GPTConfig, config: TrainingConfig):
 
     wandb.init(project="nanogpt-equinox", name=run_name, config={
         "model_size": sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array))),
-        "batch_size": config.batch_size,
-        "seq_len": model_config.max_seq_len,
-        "lr": config.lr,
         "devices": jax.device_count(),
-        "vocab_size": model_config.vocab_size,
-        "n_layers": model_config.n_layers,
+        **vars(model_config),
+        **vars(train_config),
     })
 
     train_iter = iter(train_loader)
