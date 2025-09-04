@@ -354,7 +354,7 @@ class TestMultiHeadAttention:
     @pytest.mark.parametrize("use_rotary", [True, False])
     @pytest.mark.parametrize("use_qkNorm", [True, False])
     def test_forward_shape(self, config, large_key, use_rotary, use_qkNorm):
-        config = config.copy(
+        config = config.model_copy(
             update={
                 "use_rotary": use_rotary,
                 "use_qkNorm": use_qkNorm,
@@ -370,7 +370,7 @@ class TestMultiHeadAttention:
         assert y.shape == (Batch, SeqLen, config.d_model)
 
     def test_causal_masking(self, config, large_key):
-        config = config.copy(update={"use_rotary": False, "use_qkNorm": False})
+        config = config.model_copy(update={"use_rotary": False, "use_qkNorm": False})
         attn = MultiHeadAttention(config, key=large_key)
         x = random.normal(large_key, (1, 4, config.d_model))
 
@@ -386,7 +386,7 @@ class TestMultiHeadAttention:
         assert not jnp.allclose(y_full, y_causal, atol=1e-5)
 
     def test_no_mask_broadcasting_error(self, config, large_key):
-        config = config.copy(update={"use_rotary": False})
+        config = config.model_copy(update={"use_rotary": False})
         attn = MultiHeadAttention(config, key=large_key)
         x = random.normal(large_key, (1, 5, config.d_model))
         mask = jnp.ones((5, 5), dtype=bool)  # Should be expanded internally
@@ -409,6 +409,8 @@ class TestMultiHeadAttention:
             d_head=4,
             max_seq_len=64,
             norm_eps=1e-5,
+            n_layers=2,
+            vocab_size=8
         )
         attn = MultiHeadAttention(config, key=large_key)
         x = jnp.ones((1, 3, 8))  # [B=1, T=3, D=8]
@@ -438,6 +440,8 @@ class TestMultiHeadAttention:
             d_head=4,
             max_seq_len=64,
             norm_eps=1e-5,
+            n_layers=2,
+            vocab_size=8
         )
 
         # Without qkNorm
@@ -447,7 +451,7 @@ class TestMultiHeadAttention:
         y_no_norm = attn_no_norm(x, key=large_key, mask=mask)
 
         # With qkNorm
-        config_with_norm = config_base.copy(update={"use_qkNorm": True})
+        config_with_norm = config_base.model_copy(update={"use_qkNorm": True})
         attn_with_norm = MultiHeadAttention(config_with_norm, key=large_key)
         y_with_norm = attn_with_norm(x, key=large_key, mask=mask)
 
@@ -455,7 +459,7 @@ class TestMultiHeadAttention:
         assert not jnp.allclose(y_no_norm, y_with_norm, atol=1e-5)
 
     def test_gradient_flow(self, config, large_key):
-        config = config.copy(update={"use_rotary": True, "use_qkNorm": True})
+        config = config.model_copy(update={"use_rotary": True, "use_qkNorm": True})
         attn = MultiHeadAttention(config, key=large_key)
         x = random.normal(large_key, (2, 5, config.d_model))
         mask = jnp.tril(jnp.ones((5, 5), dtype=bool))
@@ -468,7 +472,7 @@ class TestMultiHeadAttention:
         assert all(jnp.all(jnp.isfinite(g)) for g in flat_grads if isinstance(g, jnp.ndarray))
 
     def test_deterministic_output(self, config, large_key):
-        config = config.copy(update={"dropout_p": 0.0, "use_rotary": False})
+        config = config.model_copy(update={"dropout_p": 0.0, "use_rotary": False})
         attn = MultiHeadAttention(config, key=large_key)
         x = random.normal(large_key, (2, 6, config.d_model))
         mask = jnp.tril(jnp.ones((6, 6), dtype=bool))
@@ -478,7 +482,7 @@ class TestMultiHeadAttention:
         assert jnp.allclose(y1, y2, atol=1e-5)
 
     def test_jit_compilation(self, config, large_key):
-        config = config.copy(update={"use_rotary": True})
+        config = config.model_copy(update={"use_rotary": True})
         attn = MultiHeadAttention(config, key=large_key)
         x = random.normal(large_key, (2, 5, config.d_model))
         mask = jnp.tril(jnp.ones((5, 5), dtype=bool))

@@ -233,7 +233,7 @@ class MHLA(eqx.Module):
         v_state = rearrange(v_state, "b t h d -> b h t d")
 
         # Attention: Q @ K^T
-        attn_scores = jnp.einsum("b h t_q d, b h t_k d -> b h t_q t_k", q_final, k_final)
+        attn_scores = jnp.einsum("b h s d, b h t d -> b h s t", q_final, k_final)
         attn_scores = attn_scores / jnp.sqrt(self.config.d_head + self.mhla_config.d_r)
 
         # Mask
@@ -246,7 +246,7 @@ class MHLA(eqx.Module):
         weights = jax.nn.softmax(attn_scores, axis=-1)
 
         # Output: weights @ V
-        outputs = jnp.einsum("b h t_q t_k, b h t_k d -> b h t_q d", weights, v_state)
+        outputs = jnp.einsum("b h s t, b h t d -> b h s d", weights, v_state)
 
         # Back to [b, t, d_model]
         outputs = rearrange(outputs, "b h t d -> b t (h d)")
