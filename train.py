@@ -1,5 +1,7 @@
 import time
 import wandb
+import yaml
+import os
 
 import equinox as eqx
 import jax
@@ -11,6 +13,25 @@ from jaxtyping import PRNGKeyArray
 from config import GPTConfig, TrainingConfig
 from nanogpt import init_model_weights, NanoGPT, debug_model_init
 from data_utils import create_dataloader, setup_sharding
+
+
+def load_config_from_yaml(config_path: str):
+    """Load model and training configurations from YAML file."""
+    with open(config_path, 'r') as file:
+        config_data = yaml.safe_load(file)
+    
+    # Handle MHLA config if present
+    model_data = config_data['model']
+    if 'mhla_config' in model_data and model_data['mhla_config'] is not None:
+        model_data['mhla_config'] = GPTConfig.MhlaConfig(**model_data['mhla_config'])
+    elif 'mhla_config' in model_data:
+        # If mhla_config is None or not provided, set it to None
+        model_data['mhla_config'] = None
+    
+    model_config = GPTConfig(**model_data)
+    train_config = TrainingConfig(**config_data['training'])
+    
+    return model_config, train_config
 
 
 def create_safer_model(config, key: PRNGKeyArray):
@@ -169,7 +190,7 @@ def train_distributed_safe(model_config: GPTConfig, config: TrainingConfig):
         "model_size": sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array))),
         "devices": jax.device_count(),
         **vars(model_config),
-        **vars(train_config),
+        **vars(config),
     })
 
     train_iter = iter(train_loader)
@@ -233,36 +254,9 @@ def train_distributed_safe(model_config: GPTConfig, config: TrainingConfig):
     return model, opt_state
 
 if __name__ == "__main__":
-    model_config = GPTConfig(
-        activation_type="gelu",
-        dropout_p=0.1,  # Add some dropout
-        d_model=512,
-        linear_d_hidden=1024,
-        norm_eps=1e-5,
-        use_bias=True,
-        use_qkNorm=True,
-        tie_word_embeddings=False,
-        use_rotary=True,
-        max_seq_len=64,
-        n_heads=16,
-        d_head=32,
-        n_layers=12,
-        vocab_size=50257,
-    )
-
-    train_config = TrainingConfig(
-        batch_size=8,
-        micro_batch_size=8,
-        eval_batch_size=1,
-        grad_accum_steps=2,
-        epochs=1,
-        lr=3e-4,
-        weight_decay=0.1,
-        max_grad_norm=1.0,
-        warmup_steps=100,
-        optimizer="adamw",
-        scheduler="cosine"
-    )
+    # Load configurations from YAML file
+    config_path = os.environ.get("TRAIN_CONFIG_PATH", "config/model_config.yaml")
+    model_config, train_config = load_config_from_yaml(config_path)
 
     train_distributed_safe(
         model_config=model_config, config=train_config

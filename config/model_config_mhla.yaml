@@ -1,0 +1,35 @@
+# Model configuration with MHLA attention
+model:
+  activation_type: "gelu"
+  dropout_p: 0.1
+  d_model: 512
+  linear_d_hidden: 1024
+  norm_eps: 1e-5
+  use_bias: true
+  use_qkNorm: true
+  tie_word_embeddings: false
+  use_rotary: true
+  max_seq_len: 64
+  n_heads: 16
+  d_head: 32
+  n_layers: 12
+  vocab_size: 50257
+  attention_type: "mhla"
+  mhla_config:
+    d_c: 256
+    d_c1: 256
+    d_r: 16
+
+# Training configuration
+training:
+  batch_size: 8
+  micro_batch_size: 8
+  eval_batch_size: 1
+  grad_accum_steps: 2
+  epochs: 1
+  lr: 3e-4
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  warmup_steps: 100
+  optimizer: "adamw"
+  scheduler: "cosine"

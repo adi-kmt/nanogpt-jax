@@ -5,14 +5,15 @@ from typing import Optional
 from jaxtyping import Array, Float, Bool, Int
 from config import GPTConfig
 
-from attentions import MultiHeadAttention
+from attention_factory import create_attention
+from attentions import MultiHeadAttention, GroupQueryAttention, MHLA
 from layers import MLP, Linear
 from norms import RMSNorm
 
 
 class DecoderBlock(eqx.Module):
     attn_norm: RMSNorm
-    attn: MultiHeadAttention
+    attn: MultiHeadAttention | GroupQueryAttention | MHLA
     ffn_norm: RMSNorm
     ffn: MLP
     config: GPTConfig = eqx.field(static=True)
@@ -24,7 +25,7 @@ class DecoderBlock(eqx.Module):
         self.attn_norm = RMSNorm(config, key=None)
         self.ffn_norm = RMSNorm(config, key=None)
 
-        self.attn = MultiHeadAttention(config, key=key1)
+        self.attn = create_attention(config, key=key1)
 
         self.ffn = MLP(config, key=key2)
 
