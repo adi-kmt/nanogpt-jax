@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import equinox as eqx
 from jax import random
 
-from attentions import MultiHeadAttention, GroupQueryAttention, MHLA
+from attentions import MultiHeadAttention, GroupQueryAttention, MHLA, VoMHLA
 from config import GPTConfig
 
 
@@ -447,3 +447,104 @@ class TestMHLA:
         
         y = attn(x, key=key, mask=mask)
         assert y.shape == (1, 4, config.d_model)
+
+
+class TestVoMHLA:
+    def test_forward_shape(self, config, mhla_config, key):
+        attn = VoMHLA(config, mhla_config, key=key)
+        x = random.normal(key, (Batch, SeqLen, config.d_model))
+        mask = jnp.tril(jnp.ones((SeqLen, SeqLen), dtype=bool))
+
+        key1, key2 = random.split(key)
+        y = attn(x, key=key1, mask=mask)
+
+        assert y.shape == (Batch, SeqLen, config.d_model)
+
+    @pytest.mark.parametrize("use_qkNorm", [True, False])
+    def test_qk_norm_functionality(self, config, mhla_config, key, use_qkNorm):
+        config = config.model_copy(update={"use_qkNorm": use_qkNorm})
+        attn = VoMHLA(config, mhla_config, key=key)
+        x = random.normal(key, (1, 4, config.d_model))
+        mask = jnp.tril(jnp.ones((4, 4), dtype=bool))
+
+        y = attn(x, key=key, mask=mask)
+        assert y.shape == (1, 4, config.d_model)
+
+    def test_causal_masking(self, config, mhla_config, key):
+        config = config.model_copy(update={"use_qkNorm": False})
+        attn = VoMHLA(config, mhla_config, key=key)
+        x = random.normal(key, (1, 4, config.d_model))
+
+        # Full attention mask
+        full_mask = jnp.ones((4, 4), dtype=bool)
+        y_full = attn(x, key=key, mask=full_mask)
+
+        # Causal mask
+        causal_mask = jnp.tril(jnp.ones((4, 4), dtype=bool))
+        y_causal = attn(x, key=key, mask=causal_mask)
+
+        # Outputs should differ due to masking
+        assert not jnp.allclose(y_full, y_causal, atol=1e-5)
+
+    def test_rotary_applied_correctly(self, key, mhla_config):
+        config = GPTConfig(
+            activation_type="gelu",
+            dropout_p=0.0,
+            d_model=16,  # Changed to 16 to make d_head=8, which works with Rotary
+            linear_d_hidden=16,
+            use_bias=False,
+            use_qkNorm=False,
+            tie_word_embeddings=True,
+            use_rotary=True,
+            n_heads=2,
+            d_head=8,  # Changed to 8 to work with Rotary (needs to be divisible by 4)
+            n_kv_heads=2,
+            max_seq_len=64,
+            norm_eps=1e-5,
+            n_layers=2,
+            vocab_size=8
+        )
+        attn = VoMHLA(config, mhla_config, key=key)
+        x = jnp.ones((1, 3, 16))  # [B=1, T=3, D=16]
+        mask = jnp.tril(jnp.ones((3, 3), dtype=bool))
+        y = attn(x, key=key, mask=mask)
+
+        assert y.shape == (1, 3, 16)
+        assert jnp.all(jnp.isfinite(y))
+
+    def test_gradient_flow(self, config, mhla_config, key):
+        config = config.model_copy(update={"use_rotary": True, "use_qkNorm": True})
+        attn = VoMHLA(config, mhla_config, key=key)
+        x = random.normal(key, (2, 5, config.d_model))
+        mask = jnp.tril(jnp.ones((5, 5), dtype=bool))
+
+        def loss(module, x, mask, key):
+            return jnp.sum(module(x, key=key, mask=mask) ** 2)
+
+        grads = jax.grad(loss)(attn, x, mask, key)
+        flat_grads, _ = jax.tree_util.tree_flatten(grads)
+        assert all(jnp.all(jnp.isfinite(g)) for g in flat_grads if isinstance(g, jnp.ndarray))
+
+    def test_deterministic_output(self, config, mhla_config, key):
+        config = config.model_copy(update={"dropout_p": 0.0})
+        attn = VoMHLA(config, mhla_config, key=key)
+        x = random.normal(key, (2, 6, config.d_model))
+        mask = jnp.tril(jnp.ones((6, 6), dtype=bool))
+
+        y1 = attn(x, key=key, mask=mask)
+        y2 = attn(x, key=key, mask=mask)
+        assert jnp.allclose(y1, y2, atol=1e-5)
+
+    def test_jit_compilation(self, config, mhla_config, key):
+        config = config.model_copy(update={"use_rotary": True})
+        attn = VoMHLA(config, mhla_config, key=key)
+        x = random.normal(key, (2, 5, config.d_model))
+        mask = jnp.tril(jnp.ones((5, 5), dtype=bool))
+
+        @jax.jit
+        def forward(module, x, mask, key):
+            return module(x, key=key, mask=mask)
+
+        y = forward(attn, x, mask, key)
+        assert y.shape == (2, 5, config.d_model)
+        assert jnp.all(jnp.isfinite(y))

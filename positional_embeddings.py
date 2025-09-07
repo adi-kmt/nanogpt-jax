@@ -27,7 +27,7 @@ class Rotary(eqx.Module):
         self.cos = jnp.cos(theta)  # [max_seq_len, dim//2]
         self.sin = jnp.sin(theta)  # [max_seq_len, dim//2]
 
-    def __call__(self, x_BTHD: jax.Array) -> jax.Array:
+    def __call__(self, x_BTHD: jax.Array, reverse=False) -> jax.Array:
         """
         Apply rotary embedding.
 
@@ -54,9 +54,13 @@ class Rotary(eqx.Module):
         x_float = x_BTHD.astype(jnp.float32)
         x1, x2 = jnp.split(x_float, 2, axis=-1)  # Each: [B, T, H, dim//2]
 
-        # Apply rotation
-        y1 = x1 * cos + x2 * sin
-        y2 = x1 * (-sin) + x2 * cos  # Note: -sin on x1
+        if not reverse:
+            # Apply rotation
+            y1 = x1 * cos + x2 * sin
+            y2 = x1 * (-sin) + x2 * cos
+        else:
+            y1 = x1 * cos - x2 * sin
+            y2 = x1 * sin + x2 * cos
 
         # Recombine
         out = jnp.concatenate([y1, y2], axis=-1)  # [B, T, H, dim]

@@ -66,7 +66,7 @@ class MultiHeadAttention(eqx.Module):
             mask = jnp.expand_dims(mask, (0, 1))  # [1, 1, S, S]
             attn_scores = jnp.where(mask, attn_scores, -jnp.inf)
 
-        # Apply softmax
+        # Apply softmax over all the keys dimension to make find the best matching keys for each query
         attn_weights = jax.nn.softmax(attn_scores, axis=-1)
 
         # Apply attention to values: [B, H, S, D_head]
@@ -250,6 +250,101 @@ class MHLA(eqx.Module):
 
         # Back to [b, t, d_model]
         outputs = rearrange(outputs, "b h t d -> b t (h d)")
+
+        # Final projection
+        outputs = self.w_o(outputs)
+
+        return outputs
+
+class VoMHLA(eqx.Module):
+    w_o: Linear
+    w_dq: Linear
+    w_uq: Linear
+    w_dkv: Linear
+    w_uk: Linear
+    w_uv: Linear
+    rotary: Rotary
+    config: GPTConfig = eqx.field(static=True)
+    mhla_config: GPTConfig.MhlaConfig = eqx.field(static=True)
+
+    def __init__(self, config: GPTConfig, mhla_config: GPTConfig.MhlaConfig, key: jax.random.PRNGKey):
+        self.config = config
+        self.mhla_config = mhla_config
+
+        k1, k2, k3, k4, k5, k6 = jax.random.split(key, 6)
+        self.w_dq = Linear(config.d_model, mhla_config.d_c1, use_bias=False, key=k1)
+        self.w_uq = Linear(mhla_config.d_c1, config.d_model, use_bias=False, key=k2)
+        self.w_dkv = Linear(config.d_model, mhla_config.d_c, use_bias=False, key=k3)
+        self.w_uk = Linear(mhla_config.d_c, config.d_model, use_bias=False, key=k4)
+        self.w_uv = Linear(mhla_config.d_c, config.d_model, use_bias=False, key=k5)
+        self.w_o = Linear(config.d_model, config.d_model, use_bias=False, key=k6)
+
+        # Rotary embedding dimension should match d_head
+        self.rotary = Rotary(dim=config.d_head, max_seq_len=config.max_seq_len)
+
+    def __call__(
+            self,
+            x: Float[Array, "batch seq_len d_model"],
+            key: jax.random.PRNGKey,
+            mask: Bool[Array, "seq_len seq_len"] = None,
+    ) -> Float[Array, "batch seq_len d_model"]:
+        b, t, _ = x.shape
+
+        # Compress
+        c_q = self.w_dq(x)  # [b, t, d_c1]
+        c_kv = self.w_dkv(x)  # [b, t, d_c]
+
+        # State path
+        q_state = self.w_uq(c_q)  # [b, t, d_model]
+        k_state = self.w_uk(c_kv)  # [b, t, d_model]
+        v_state = self.w_uv(c_kv)  # [b, t, d_model]
+
+        # Reshape to heads: [b, t, h, d_head]
+        q_final = rearrange(q_state, "b t (h d) -> b t h d", h=self.config.n_heads, d=self.config.d_head)
+        k_final = rearrange(k_state, "b t (h d) -> b t h d", h=self.config.n_heads, d=self.config.d_head)
+        v_state = rearrange(v_state, "b t (h d) -> b t h d", h=self.config.n_heads, d=self.config.d_head)
+
+        # Optional QK Norm
+        if self.config.use_qkNorm:
+            q_final = norm_without_weight(q_final, self.config.norm_eps)
+            k_final = norm_without_weight(k_final, self.config.norm_eps)
+
+        # Apply rotary embeddings to Q and K before attention
+        if self.config.use_rotary:
+            # Apply rotary embeddings (expects [b, t, h, d])
+            q_final = self.rotary(q_final)
+            k_final = self.rotary(k_final)
+
+        # Transpose for attention: [b, h, t, d]
+        q_final = rearrange(q_final, "b t h d -> b h t d")
+        k_final = rearrange(k_final, "b t h d -> b h t d")
+
+        # Attention: Q @ K^T
+        attn_scores = jnp.einsum("b h s d, b h t d -> b h s t", q_final, k_final)
+        attn_scores = attn_scores / jnp.sqrt(self.config.d_head)
+
+        # Mask
+        if mask is not None:
+            # Expand mask to [B, H, S, S] format
+            mask = jnp.expand_dims(mask, (0, 1))  # [1, 1, S, S]
+            attn_scores = jnp.where(mask, attn_scores, -jnp.inf)
+
+        # Softmax
+        weights = jax.nn.softmax(attn_scores, axis=-1)
+
+        # Apply rotary to V-state
+        v_state = self.rotary(v_state)
+        v_state = rearrange(v_state, "b t h d -> b h t d")
+
+        # Output: weights @ V
+        outputs = jnp.einsum("b h s t, b h t d -> b h s d", weights, v_state)
+
+        # Apply inverse rotary to outputs
+        outputs = rearrange(outputs, "b h t d -> b t h d")
+        outputs = self.rotary(outputs, reverse=True)
+
+        # Back to [b, t, d_model]
+        outputs = rearrange(outputs, "b t h d -> b t (h d)")
 
         # Final projection
         outputs = self.w_o(outputs)

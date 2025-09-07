@@ -27,7 +27,7 @@ class GPTConfig(BaseModel):
     vocab_size: int
     
     # Attention type configuration
-    attention_type: Literal["mha", "gqa", "mhla"] = "mha"
+    attention_type: Literal["mha", "gqa", "mhla", "vo-mhla"] = "mha"
     mhla_config: Optional["GPTConfig.MhlaConfig"] = None
 
     class MhlaConfig(BaseModel):

@@ -1,7 +1,7 @@
 import jax
 from jaxtyping import Array, Float, Bool
 from config import GPTConfig
-from attentions import MultiHeadAttention, GroupQueryAttention, MHLA
+from attentions import MultiHeadAttention, GroupQueryAttention, MHLA, VoMHLA
 
 
 def create_attention(config: GPTConfig, key: jax.random.PRNGKey):
@@ -24,6 +24,11 @@ def create_attention(config: GPTConfig, key: jax.random.PRNGKey):
         if config.mhla_config is None:
             raise ValueError("MHLA attention type requires mhla_config to be set in GPTConfig")
         return MHLA(config, config.mhla_config, key=key)
+    elif config.attention_type == "vo-mhla":
+        # VoMHLA requires additional mhla_config
+        if config.mhla_config is None:
+            raise ValueError("MHLA attention type requires mhla_config to be set in GPTConfig")
+        return VoMHLA(config, config.mhla_config, key=key)
     else:
         raise ValueError(f"Unknown attention type: {config.attention_type}")
 
