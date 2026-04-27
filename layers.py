@@ -43,18 +43,47 @@ class Linear(eqx.Module):
 
 class MLP(eqx.Module):
     layer1: Linear
+    gate: Linear | None
     layer2: Linear
     dropout: eqx.nn.Dropout
     activation_type: str = eqx.field(static=True)
 
     def __init__(self, config: GPTConfig, key: jax.random.PRNGKey):
-        key1, key2 = jax.random.split(key)
-        self.layer1 = Linear(config.d_model, config.linear_d_hidden, key=key1)
-        self.layer2 = Linear(config.linear_d_hidden, config.d_model, key=key2)
-        self.activation_type = config.activation_type
+        key1, key2, key3 = jax.random.split(key, 3)
+        activation_type = "silu" if config.activation_type == "swilu" else config.activation_type
+        if activation_type != "swiglu" and activation_type not in activations:
+            raise ValueError(f"Unsupported activation_type: {config.activation_type}")
+
+        self.layer1 = Linear(
+            config.d_model,
+            config.linear_d_hidden,
+            key=key1,
+            use_bias=config.use_bias,
+        )
+        self.gate = (
+            Linear(
+                config.d_model,
+                config.linear_d_hidden,
+                key=key2,
+                use_bias=config.use_bias,
+            )
+            if activation_type == "swiglu"
+            else None
+        )
+        self.layer2 = Linear(
+            config.linear_d_hidden,
+            config.d_model,
+            key=key3,
+            use_bias=config.use_bias,
+        )
+        self.activation_type = activation_type
         self.dropout = eqx.nn.Dropout(config.dropout_p)
 
     def __call__(self, x: Float[Array, "batch seq_len d_model"], inference: bool, key: jax.random.PRNGKey) -> Float[Array, "batch seq_len d_model"]:
-        act_fn = activations[self.activation_type]
-        x = self.dropout(act_fn(self.layer1(x)), key=key, inference=inference)
+        if self.activation_type == "swiglu":
+            x = activations["silu"](self.layer1(x)) * self.gate(x)
+        else:
+            act_fn = activations[self.activation_type]
+            x = act_fn(self.layer1(x))
+        x = self.dropout(x, key=key, inference=inference)
         return self.layer2(x)

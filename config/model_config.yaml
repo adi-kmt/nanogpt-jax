@@ -1,30 +1,27 @@
-# Model configuration with MHLA attention
+# Standard MHA configuration
 model:
   activation_type: "gelu"
   dropout_p: 0.1
   d_model: 512
-  linear_d_hidden: 1024
+  linear_d_hidden: 2048
   norm_eps: 1e-5
   use_bias: true
-  use_qkNorm: true
-  tie_word_embeddings: false
+  use_qkNorm: false
+  tie_word_embeddings: true
   use_rotary: true
   max_seq_len: 64
   n_heads: 16
   d_head: 32
+  n_kv_heads: null
   n_layers: 12
   vocab_size: 50257
-  attention_type: "mhla"
-  mhla_config:
-    d_c: 256
-    d_c1: 256
-    d_r: 16
+  attention_type: "mha"
+  mhla_config: null
 
-# Training configuration
 training:
   batch_size: 16
   micro_batch_size: 8
-  eval_batch_size: 1
+  eval_batch_size: 8
   grad_accum_steps: 2
   epochs: 1
   lr: 3e-4
@@ -47,5 +44,5 @@ data:
 logging:
   enabled: true
   project: "nanogpt-equinox"
-  tags: ["tinyshakespeare", "mhla"]
+  tags: ["tinyshakespeare"]
   save_code: true

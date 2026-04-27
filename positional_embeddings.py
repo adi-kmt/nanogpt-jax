@@ -10,14 +10,21 @@ class Rotary(eqx.Module):
     max_seq_len: int = eqx.field(static=True)
 
     def __init__(self, dim: int, max_seq_len: int):
+        if dim <= 0:
+            raise ValueError("Rotary dim must be positive")
+        if dim % 2 != 0:
+            raise ValueError("Rotary dim must be even")
         self.dim = dim
         self.max_seq_len = max_seq_len
 
-        # Step 1: Create angular frequencies
-        # (1 / 1024) ** linspace(0, 1, dim//4)
-        angular_freq = (1 / 1024) ** jnp.linspace(0, 1, dim // 4, dtype=jnp.float32)
-        # Step 2: Concatenate with zeros: [angular_freq, zeros]
-        angular_freq = jnp.concatenate([angular_freq, jnp.zeros((dim // 4,), dtype=jnp.float32)])  # shape: [dim//2]
+        half_dim = dim // 2
+        rotated_dim = max(1, half_dim // 2)
+
+        angular_freq = (1 / 1024) ** jnp.linspace(0, 1, rotated_dim, dtype=jnp.float32)
+        angular_freq = jnp.concatenate([
+            angular_freq,
+            jnp.zeros((half_dim - rotated_dim,), dtype=jnp.float32),
+        ])
 
         # Step 3: Outer product: t[i] * angular_freq[j]
         t = jnp.arange(max_seq_len, dtype=jnp.float32)

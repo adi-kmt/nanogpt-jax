@@ -6,14 +6,14 @@ from jaxtyping import Array, Float, Bool, Int
 from config import GPTConfig
 
 from attention_factory import create_attention
-from attentions import MultiHeadAttention, GroupQueryAttention, MHLA
+from attentions import MultiHeadAttention, GroupQueryAttention, MHLA, VoMHLA
 from layers import MLP, Linear
 from norms import RMSNorm
 
 
 class DecoderBlock(eqx.Module):
     attn_norm: RMSNorm
-    attn: MultiHeadAttention | GroupQueryAttention | MHLA
+    attn: MultiHeadAttention | GroupQueryAttention | MHLA | VoMHLA
     ffn_norm: RMSNorm
     ffn: MLP
     config: GPTConfig = eqx.field(static=True)
@@ -109,7 +109,6 @@ def init_model_weights(model, key, config):
     keys = jax.random.split(key, len(jax.tree_util.tree_leaves(params)))
     key_iter = iter(keys)
 
-    d_model = config.d_model
     n_layers = config.n_layers
 
     # ✅ CRITICAL: Depth-aware scaling factors
@@ -147,28 +146,28 @@ def init_model_weights(model, key, config):
 
         elif any(w in path_names for w in ['w_q', 'w_k', 'w_v']):
             # Use much smaller initialization for deep networks
-            fan_in = shape[-2]
+            fan_in = shape[-1]
             std = (0.02 / jnp.sqrt(fan_in)) * depth_scale
             result = jax.random.normal(k, shape) * std
             print(f"  -> QKV: std={std:.6f} (depth_scale={depth_scale:.3f})")
             return result
 
         elif 'w_o' in path_names:
-            fan_in = shape[-2]
+            fan_in = shape[-1]
             std = (0.01 / jnp.sqrt(fan_in)) * residual_scale
             result = jax.random.normal(k, shape) * std
             print(f"  -> Output proj: std={std:.6f} (residual_scale={residual_scale:.3f})")
             return result
 
-        elif 'layer1' in path_names:
-            fan_in, fan_out = shape[-2], shape[-1]
+        elif 'layer1' in path_names or 'gate' in path_names:
+            fan_in = shape[-1]
             std = jnp.sqrt(2.0 / fan_in) * depth_scale * 0.5
             result = jax.random.normal(k, shape) * std
-            print(f"  -> MLP layer1: std={std:.6f}")
+            print(f"  -> MLP input proj: std={std:.6f}")
             return result
 
         elif 'layer2' in path_names:
-            fan_in = shape[-2]
+            fan_in = shape[-1]
             std = (0.01 / jnp.sqrt(fan_in)) * residual_scale
             result = jax.random.normal(k, shape) * std
             print(f"  -> MLP layer2: std={std:.6f} (residual)")
@@ -183,7 +182,7 @@ def init_model_weights(model, key, config):
             return result
 
         if len(shape) >= 2:
-            fan_in = shape[-2]
+            fan_in = shape[-1]
             std = (0.01 / jnp.sqrt(fan_in)) * depth_scale
             result = jax.random.normal(k, shape) * std
             print(f"  -> Fallback: std={std:.6f}")

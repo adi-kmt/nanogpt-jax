@@ -17,3 +17,9 @@ dependencies = [
     "transformers>=4.54.1",
     "wandb>=0.21.0",
 ]
+
+[project.optional-dependencies]
+slowrun = [
+    "torch==2.10",
+    "tqdm>=4.67.0",
+]

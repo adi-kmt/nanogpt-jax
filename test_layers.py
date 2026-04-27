@@ -13,6 +13,7 @@ from layers import Linear, MLP, activations
 from config import GPTConfig
 from nanogpt import DecoderBlock, NanoGPT
 from norms import RMSNorm, norm_without_weight
+from positional_embeddings import Rotary
 from typing import Optional, Callable
 from dataclasses import replace
 
@@ -196,6 +197,27 @@ class TestMLP:
         key1, _ = random.split(key)
         y = mlp(x, inference=False, key=key1)
         assert y.shape == (Batch, SeqLen, config.d_model)
+
+    def test_config_accepts_activation_table_entries(self, config):
+        config_data = config.model_dump()
+        for activation_type in activations:
+            GPTConfig(**{**config_data, "activation_type": activation_type})
+
+    def test_swiglu_forward_shape(self, config, key):
+        config = config.model_copy(update={"activation_type": "swiglu"})
+        mlp = MLP(config, key=key)
+        x = random.normal(key, (Batch, SeqLen, config.d_model))
+        y = mlp(x, inference=True, key=key)
+
+        assert mlp.gate is not None
+        assert y.shape == (Batch, SeqLen, config.d_model)
+
+    def test_use_bias_false(self, config, key):
+        config = config.model_copy(update={"use_bias": False})
+        mlp = MLP(config, key=key)
+
+        assert mlp.layer1.bias is None
+        assert mlp.layer2.bias is None
 
     def test_inference_vs_training_dropout(self, config, key):
         config = config.model_copy(update={"dropout_p": 0.5})
@@ -494,6 +516,22 @@ class TestMultiHeadAttention:
         y = forward(attn, x, mask, large_key)
         assert y.shape == (2, 5, config.d_model)
         assert jnp.all(jnp.isfinite(y))
+
+
+class TestRotary:
+    @pytest.mark.parametrize("dim", [2, 4, 6, 8])
+    def test_preserves_even_dimensions(self, dim):
+        rotary = Rotary(dim=dim, max_seq_len=8)
+        x = jnp.ones((1, 4, 2, dim))
+        y = rotary(x)
+
+        assert y.shape == x.shape
+        assert jnp.all(jnp.isfinite(y))
+
+    def test_rejects_odd_dimensions(self):
+        with pytest.raises(ValueError, match="even"):
+            Rotary(dim=3, max_seq_len=8)
+
 
 class TestDecoderBlock:
     def test_initialization(self, config, key):

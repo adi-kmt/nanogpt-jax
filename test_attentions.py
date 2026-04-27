@@ -199,6 +199,12 @@ class TestMultiHeadAttention:
 
 
 class TestGroupQueryAttention:
+    def test_requires_n_kv_heads(self, config, key):
+        config = config.model_copy(update={"n_kv_heads": None})
+
+        with pytest.raises(ValueError, match="n_kv_heads"):
+            GroupQueryAttention(config, key=key)
+
     @pytest.mark.parametrize("use_rotary", [True, False])
     @pytest.mark.parametrize("use_qkNorm", [True, False])
     def test_forward_shape(self, config, key, use_rotary, use_qkNorm):
@@ -386,7 +392,7 @@ class TestMHLA:
             tie_word_embeddings=True,
             use_rotary=True,
             n_heads=2,
-            d_head=2,
+            d_head=4,
             n_kv_heads=2,
             max_seq_len=64,
             norm_eps=1e-5,

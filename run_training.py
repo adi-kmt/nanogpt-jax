@@ -24,10 +24,10 @@ def run_training_with_config(config_name: str = "model_config.yaml"):
         
         # Run training
         from train import load_config_from_yaml, train_distributed_safe
-        model_config, train_config = load_config_from_yaml(config_path)
+        model_config, train_config, data_config, wandb_config = load_config_from_yaml(config_path)
         print(f"Starting training with configuration: {config_name}")
         print(f"Model attention type: {model_config.attention_type}")
-        train_distributed_safe(model_config, train_config)
+        train_distributed_safe(model_config, train_config, data_config, wandb_config)
         return True
     except Exception as e:
         print(f"Error during training: {e}")
@@ -39,6 +39,7 @@ if __name__ == "__main__":
     print("1. Standard MHA model: python run_training.py model_config.yaml")
     print("2. MHLA model: python run_training.py model_config_mhla.yaml")
     print("3. Small test model: python run_training.py model_config_small.yaml")
+    print("4. Slowrun FineWeb model: python run_training.py model_config_slowrun.yaml")
     
     # If a config name is provided as command line argument
     if len(sys.argv) > 1:

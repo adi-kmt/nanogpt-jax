@@ -11,6 +11,22 @@ from norms import norm_without_weight
 from positional_embeddings import Rotary
 from jax.lax import ragged_dot_general
 
+
+def _validate_head_dimensions(config: GPTConfig):
+    if config.d_model != config.n_heads * config.d_head:
+        raise ValueError("d_model must equal n_heads * d_head")
+    if config.d_head % 2 != 0:
+        raise ValueError("d_head must be even")
+
+
+def _validate_gqa_dimensions(config: GPTConfig):
+    if config.n_kv_heads is None:
+        raise ValueError("GQA requires n_kv_heads")
+    if config.n_kv_heads <= 0:
+        raise ValueError("n_kv_heads must be positive")
+    if config.n_heads % config.n_kv_heads != 0:
+        raise ValueError("n_heads must be divisible by n_kv_heads")
+
 class MultiHeadAttention(eqx.Module):
     w_q: Linear
     w_k: Linear
@@ -20,6 +36,7 @@ class MultiHeadAttention(eqx.Module):
     rotary: Rotary
 
     def __init__(self, config: GPTConfig, key: jax.random.PRNGKey):
+        _validate_head_dimensions(config)
         key1, key2, key3, key4 = jax.random.split(key, 4)
         self.config = config
         self.w_q = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key1)
@@ -90,6 +107,8 @@ class GroupQueryAttention(eqx.Module):
     rotary: Rotary
 
     def __init__(self, config: GPTConfig, key: jax.random.PRNGKey):
+        _validate_head_dimensions(config)
+        _validate_gqa_dimensions(config)
         key1, key2, key3, key4 = jax.random.split(key, 4)
         self.config = config
         self.w_q = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key1)
@@ -169,6 +188,9 @@ class MHLA(eqx.Module):
     mhla_config: GPTConfig.MhlaConfig = eqx.field(static=True)
 
     def __init__(self, config: GPTConfig, mhla_config: GPTConfig.MhlaConfig, key: jax.random.PRNGKey):
+        _validate_head_dimensions(config)
+        if mhla_config.d_r % 2 != 0:
+            raise ValueError("mhla_config.d_r must be even")
         self.config = config
         self.mhla_config = mhla_config
 
@@ -268,6 +290,7 @@ class VoMHLA(eqx.Module):
     mhla_config: GPTConfig.MhlaConfig = eqx.field(static=True)
 
     def __init__(self, config: GPTConfig, mhla_config: GPTConfig.MhlaConfig, key: jax.random.PRNGKey):
+        _validate_head_dimensions(config)
         self.config = config
         self.mhla_config = mhla_config
 
