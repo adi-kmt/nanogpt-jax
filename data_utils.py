@@ -1,4 +1,5 @@
 import os
+import hashlib
 from typing import Optional
 
 import jax
@@ -69,7 +70,7 @@ class TinyShakespeareDataLoader:
 
 
 class SlowRunDataLoader:
-    """Numpy/JAX loader for Slowrun FineWeb `.pt` files.
+    """Numpy/JAX loader for Slowrun FineWeb `.npz` or `.pt` files.
 
     The expected file format is produced by `prepare_slowrun_data.py` and mirrors
     qlabs-eng/slowrun: flat GPT-2 token ids plus document starts, BOS id, sequence
@@ -85,8 +86,8 @@ class SlowRunDataLoader:
         self.epoch = 1
 
         data = self._load_file(filepath)
-        tokens = np.asarray(data["tokens"].cpu().numpy(), dtype=np.int64)
-        doc_starts = np.asarray(data["doc_starts"].cpu().numpy(), dtype=np.int64)
+        tokens = np.asarray(_to_numpy(data["tokens"]), dtype=np.int64)
+        doc_starts = np.asarray(_to_numpy(data["doc_starts"]), dtype=np.int64)
         self.bos_id = int(data["bos_id"])
         self.default_shuffle_seed = int(data["seq_shuffle_seed"])
         file_seq_size = int(data.get("seq_size", self.seq_size))
@@ -111,6 +112,11 @@ class SlowRunDataLoader:
                 f"Slowrun data file not found: {filepath}. "
                 "Run `python prepare_slowrun_data.py` first."
             )
+        if filepath.endswith(".npz"):
+            npz = np.load(filepath)
+            return {key: npz[key] for key in npz.files}
+        if not filepath.endswith(".pt"):
+            raise ValueError(f"Unsupported Slowrun data file format: {filepath}")
         try:
             import torch
         except ImportError as exc:
@@ -174,8 +180,61 @@ def resolve_slowrun_path(config: DataConfig, split: str) -> str:
     explicit = config.train_path if split == "train" else config.val_path
     if explicit:
         return explicit
-    filename = "fineweb_train.pt" if split == "train" else "fineweb_val.pt"
-    return os.path.join(config.data_dir, filename)
+
+    stem = "fineweb_train" if split == "train" else "fineweb_val"
+    if config.data_format == "auto":
+        candidates = [
+            os.path.join(config.data_dir, f"{stem}.npz"),
+            os.path.join(config.data_dir, f"{stem}.pt"),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        return candidates[0]
+    return os.path.join(config.data_dir, f"{stem}.{config.data_format}")
+
+
+def _to_numpy(value):
+    if hasattr(value, "detach"):
+        return value.detach().cpu().numpy()
+    if hasattr(value, "cpu"):
+        return value.cpu().numpy()
+    return value
+
+
+def sha256_file(filepath: str, chunk_size: int = 1 << 20) -> str:
+    digest = hashlib.sha256()
+    with open(filepath, "rb") as file:
+        for chunk in iter(lambda: file.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def describe_data_artifacts(data_config: DataConfig, splits: tuple[str, ...] = ("train", "val")) -> dict:
+    if data_config.dataset != "slowrun":
+        return {
+            "dataset": data_config.dataset,
+            "tokenizer": data_config.tokenizer,
+            "tinyshakespeare_url": data_config.tinyshakespeare_url,
+        }
+
+    artifacts = {
+        "dataset": data_config.dataset,
+        "tokenizer": data_config.tokenizer,
+        "doc_shuffle": data_config.doc_shuffle,
+        "files": {},
+    }
+    for split in splits:
+        path = resolve_slowrun_path(data_config, split)
+        file_info = {
+            "path": path,
+            "exists": os.path.exists(path),
+        }
+        if os.path.exists(path):
+            file_info["size_bytes"] = os.path.getsize(path)
+            file_info["sha256"] = sha256_file(path)
+        artifacts["files"][split] = file_info
+    return artifacts
 
 
 def create_dataloader(

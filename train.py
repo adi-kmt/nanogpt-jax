@@ -3,6 +3,7 @@ import wandb
 import yaml
 import os
 import math
+from pathlib import Path
 
 import equinox as eqx
 import jax
@@ -12,8 +13,20 @@ import optax
 
 from jaxtyping import PRNGKeyArray
 from config import DataConfig, GPTConfig, TrainingConfig, WandbConfig
+from checkpoint_utils import (
+    checkpoint_metadata,
+    prune_step_checkpoints,
+    save_checkpoint,
+    stable_hash,
+)
 from nanogpt import init_model_weights, NanoGPT, debug_model_init
-from data_utils import create_dataloader, gpt2_token_bytes, setup_sharding
+from data_utils import create_dataloader, describe_data_artifacts, gpt2_token_bytes, setup_sharding
+from optimizers import (
+    create_learning_rate_schedule,
+    create_optimizer,
+    create_weight_decay_schedule,
+    optimizer_group_metrics,
+)
 
 
 def load_config_from_yaml(config_path: str):
@@ -131,46 +144,6 @@ def fetch_batch_data(data_loader, grad_accum_steps):
         except StopIteration:
             return None, True
     return batch_data, False
-
-
-def create_lr_schedule(config: TrainingConfig, total_steps: int):
-    """Create the configured learning-rate schedule."""
-    if total_steps <= 0:
-        raise ValueError("total_steps must be positive")
-
-    decay_steps = max(total_steps - config.warmup_steps, 1)
-    if config.scheduler == "cosine":
-        main_schedule = optax.cosine_decay_schedule(config.lr, decay_steps, alpha=0.1)
-    elif config.scheduler == "linear":
-        main_schedule = optax.linear_schedule(config.lr, 0.0, decay_steps)
-    elif config.scheduler is None:
-        main_schedule = optax.constant_schedule(config.lr)
-    else:
-        raise ValueError(f"Unsupported scheduler: {config.scheduler}")
-
-    if config.warmup_steps == 0:
-        return main_schedule
-
-    warmup = optax.linear_schedule(0.0, config.lr, config.warmup_steps)
-    return optax.join_schedules([warmup, main_schedule], [config.warmup_steps])
-
-
-def create_optimizer(config: TrainingConfig, lr_schedule):
-    """Create the configured optimizer."""
-    transforms = [optax.clip_by_global_norm(config.max_grad_norm)]
-
-    if config.optimizer == "adamw":
-        transforms.append(optax.adamw(learning_rate=lr_schedule, weight_decay=config.weight_decay))
-    elif config.optimizer == "adam":
-        if config.weight_decay:
-            transforms.append(optax.add_decayed_weights(config.weight_decay))
-        transforms.append(optax.adam(learning_rate=lr_schedule))
-    elif config.optimizer == "muon":
-        transforms.append(optax.contrib.muon(learning_rate=lr_schedule, weight_decay=config.weight_decay))
-    else:
-        raise ValueError(f"Unsupported optimizer: {config.optimizer}")
-
-    return optax.chain(*transforms)
 
 
 @eqx.filter_jit
@@ -345,6 +318,53 @@ def log_metrics(run, metrics: dict, step: int):
         wandb.log(metrics, step=step)
 
 
+def maybe_log_checkpoint_artifact(run, wandb_config: WandbConfig, checkpoint_path: Path, alias: str):
+    if run is None or not wandb_config.log_checkpoints:
+        return
+    artifact = wandb.Artifact(
+        f"{wandb_config.checkpoint_artifact_prefix}-{alias}",
+        type="model-checkpoint",
+    )
+    artifact.add_dir(str(checkpoint_path))
+    run.log_artifact(artifact, aliases=[alias])
+
+
+def save_training_checkpoint(
+    root_dir: str,
+    name: str,
+    *,
+    model,
+    opt_state,
+    step: int,
+    tokens_seen: int,
+    metrics: dict,
+    model_config: GPTConfig,
+    train_config: TrainingConfig,
+    data_config: DataConfig,
+    wandb_config: WandbConfig,
+    data_artifacts: dict,
+    run,
+):
+    metadata = checkpoint_metadata(
+        step=step,
+        tokens_seen=tokens_seen,
+        metrics=metrics,
+        model_config=model_config,
+        train_config=train_config,
+        data_config=data_config,
+        wandb_config=wandb_config,
+        data_artifacts=data_artifacts,
+    )
+    checkpoint_path = save_checkpoint(
+        Path(root_dir) / name,
+        model=model,
+        opt_state=opt_state,
+        metadata=metadata,
+    )
+    maybe_log_checkpoint_artifact(run, wandb_config, checkpoint_path, name)
+    return checkpoint_path
+
+
 def train_distributed_safe(
     model_config: GPTConfig,
     config: TrainingConfig,
@@ -383,10 +403,12 @@ def train_distributed_safe(
         split="val",
         data_config=data_config,
     )
+    data_artifacts = describe_data_artifacts(data_config)
 
     total_steps = config.epochs * max(1, getattr(train_loader, "num_steps", 1) // config.grad_accum_steps)
-    lr_schedule = create_lr_schedule(config, total_steps)
-    optimizer = create_optimizer(config, lr_schedule)
+    lr_schedule = create_learning_rate_schedule(config, total_steps)
+    weight_decay_schedule = create_weight_decay_schedule(config, total_steps)
+    optimizer = create_optimizer(config, lr_schedule, weight_decay_schedule, model)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     token_bytes = gpt2_token_bytes(model_config.vocab_size)
     eval_steps = resolve_eval_steps(config, data_config, eval_loader, model_config.max_seq_len)
@@ -396,12 +418,14 @@ def train_distributed_safe(
         run.summary["model/parameters"] = count_parameters(model)
         run.summary["data/train_tokens_per_epoch"] = getattr(train_loader, "total_tokens", None)
         run.summary["data/eval_steps"] = eval_steps
+        run.summary["data/artifacts_sha256"] = stable_hash(data_artifacts)
 
     train_iter = iter(train_loader)
     step = 0
     tokens_seen = 0
     smooth_train_loss = 0.0
     ema_beta = 0.9
+    best_eval_loss = None
 
     print(
         f"Training for {total_steps} steps on {data_config.dataset}; "
@@ -453,6 +477,7 @@ def train_distributed_safe(
             grad_norm = float(optax.global_norm(jax.device_get(grads)))
             step_time = time.time() - start_time
             current_lr = float(jax.device_get(lr_schedule(step)))
+            current_wd = float(jax.device_get(weight_decay_schedule(step)))
             tokens_per_sec = (config.batch_size * model_config.max_seq_len) / max(step_time, 1e-9)
 
             # Check for problems
@@ -466,7 +491,7 @@ def train_distributed_safe(
             perplexity = safe_perplexity(loss_val)
             smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * loss_val
             debiased_loss = smooth_train_loss / (1 - ema_beta**step)
-            log_metrics(run, {
+            metrics = {
                 "step": step,
                 "tokens_seen": tokens_seen,
                 "train/loss": loss_val,
@@ -474,13 +499,39 @@ def train_distributed_safe(
                 "train/perplexity": perplexity,
                 "optimizer/grad_norm": grad_norm,
                 "optimizer/lr": current_lr,
+                "optimizer/weight_decay": current_wd,
                 "system/step_time": step_time,
                 "system/tokens_per_sec": tokens_per_sec,
                 "data/epoch": getattr(train_loader, "epoch", 1),
-            }, step=step)
+            }
+            metrics.update(optimizer_group_metrics(config, lr_schedule, weight_decay_schedule, step))
+            log_metrics(run, metrics, step=step)
 
             print(f"Step {step:5d} | Loss: {loss_val:.4f} | PPL: {perplexity:.1f} | "
-                  f"Grad norm: {grad_norm:.3f} | LR: {current_lr:.2e} | Tok/s: {tokens_per_sec:.0f}")
+                  f"Grad norm: {grad_norm:.3f} | LR: {current_lr:.2e} | WD: {current_wd:.2e} | "
+                  f"Tok/s: {tokens_per_sec:.0f}")
+
+        if config.save_every is not None and step % config.save_every == 0:
+            metrics = {
+                "train/loss": float(jax.device_get(loss)),
+                "optimizer/grad_norm": float(optax.global_norm(jax.device_get(grads))),
+            }
+            save_training_checkpoint(
+                config.checkpoint_dir,
+                f"step_{step:08d}",
+                model=model,
+                opt_state=opt_state,
+                step=step,
+                tokens_seen=tokens_seen,
+                metrics=metrics,
+                model_config=model_config,
+                train_config=config,
+                data_config=data_config,
+                wandb_config=wandb_config,
+                data_artifacts=data_artifacts,
+                run=run,
+            )
+            prune_step_checkpoints(config.checkpoint_dir, config.max_checkpoints_to_keep)
 
         should_eval = config.eval_every is not None and step % config.eval_every == 0
         if should_eval or (config.eval_on_end and step == total_steps):
@@ -494,18 +545,52 @@ def train_distributed_safe(
             )
             eval_metrics.update({"step": step, "tokens_seen": tokens_seen})
             log_metrics(run, eval_metrics, step=step)
-            if run is not None:
-                best_loss = run.summary.get("eval/best_loss")
-                if best_loss is None or eval_metrics["eval/loss"] < best_loss:
+            is_best = best_eval_loss is None or eval_metrics["eval/loss"] < best_eval_loss
+            if is_best:
+                best_eval_loss = eval_metrics["eval/loss"]
+                if run is not None:
                     run.summary["eval/best_loss"] = eval_metrics["eval/loss"]
                     if "eval/bpb" in eval_metrics:
                         run.summary["eval/best_bpb"] = eval_metrics["eval/bpb"]
                     run.summary["eval/best_step"] = step
+                if config.save_best:
+                    save_training_checkpoint(
+                        config.checkpoint_dir,
+                        "best_eval",
+                        model=model,
+                        opt_state=opt_state,
+                        step=step,
+                        tokens_seen=tokens_seen,
+                        metrics=eval_metrics,
+                        model_config=model_config,
+                        train_config=config,
+                        data_config=data_config,
+                        wandb_config=wandb_config,
+                        data_artifacts=data_artifacts,
+                        run=run,
+                    )
             print(
                 f"Eval step {step} | loss: {eval_metrics['eval/loss']:.4f} | "
                 f"ppl: {eval_metrics['eval/perplexity']:.1f} | "
                 f"bpb: {eval_metrics.get('eval/bpb', float('nan')):.4f}"
             )
+
+    if config.save_last:
+        save_training_checkpoint(
+            config.checkpoint_dir,
+            "last",
+            model=model,
+            opt_state=opt_state,
+            step=step,
+            tokens_seen=tokens_seen,
+            metrics={"train/final_step": step},
+            model_config=model_config,
+            train_config=config,
+            data_config=data_config,
+            wandb_config=wandb_config,
+            data_artifacts=data_artifacts,
+            run=run,
+        )
 
     if run is not None:
         run.summary["train/final_step"] = step

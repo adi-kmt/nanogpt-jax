@@ -50,8 +50,8 @@ class Rotary(eqx.Module):
         )
 
         # Extract cos/sin for current sequence length
-        cos = self.cos[:current_seq_len]  # [T, dim//2]
-        sin = self.sin[:current_seq_len]  # [T, dim//2]
+        cos = jax.lax.stop_gradient(self.cos[:current_seq_len])  # [T, dim//2]
+        sin = jax.lax.stop_gradient(self.sin[:current_seq_len])  # [T, dim//2]
 
         # Add broadcast axes: [1, T, 1, dim//2]
         cos = cos[None, :, None, :]

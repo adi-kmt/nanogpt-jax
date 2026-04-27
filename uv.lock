@@ -761,6 +761,9 @@ dependencies = [
 
 [package.optional-dependencies]
 slowrun = [
+    { name = "tqdm" },
+]
+slowrun-pt = [
     { name = "torch" },
     { name = "tqdm" },
 ]
@@ -777,12 +780,13 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pytest", specifier = ">=8.4.1" },
     { name = "tiktoken", specifier = ">=0.9.0" },
-    { name = "torch", marker = "extra == 'slowrun'", specifier = "==2.10" },
+    { name = "torch", marker = "extra == 'slowrun-pt'", specifier = "==2.10" },
     { name = "tqdm", marker = "extra == 'slowrun'", specifier = ">=4.67.0" },
+    { name = "tqdm", marker = "extra == 'slowrun-pt'", specifier = ">=4.67.0" },
     { name = "transformers", specifier = ">=4.54.1" },
     { name = "wandb", specifier = ">=0.21.0" },
 ]
-provides-extras = ["slowrun"]
+provides-extras = ["slowrun", "slowrun-pt"]
 
 [[package]]
 name = "nest-asyncio"

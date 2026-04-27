@@ -19,4 +19,17 @@ uv run python prepare_slowrun_data.py
 TRAIN_CONFIG_PATH=config/model_config_slowrun.yaml uv run python train.py
 ```
 
-The training loop logs train loss, validation loss, BPB, accuracy, throughput, LR, gradient norm, tokens seen, and best eval summaries to Weights & Biases when `logging.enabled` is true.
+`prepare_slowrun_data.py` writes JAX-friendly `.npz` files by default. Use `--format pt` or `--format both` only when you need compatibility with the original Slowrun PyTorch artifact format.
+
+The Slowrun config uses WSD learning-rate decay, scheduled weight decay, and ordered optimizer groups: precomputed RoPE tables are frozen, no-decay parameters use AdamW, and matrix weights use Muon. Each group can set its own LR and weight-decay multiplier.
+
+Training writes `best_eval` and `last` checkpoints under `training.checkpoint_dir`. Exact validation can be run later with:
+
+```bash
+uv run python scripts/eval_slowrun.py \
+  --config config/model_config_slowrun.yaml \
+  --checkpoint checkpoints/slowrun/best_eval \
+  --full
+```
+
+The training loop logs train loss, validation loss, BPB, accuracy, throughput, LR, weight decay, gradient norm, tokens seen, and best eval summaries to Weights & Biases when `logging.enabled` is true.

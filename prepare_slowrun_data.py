@@ -1,6 +1,6 @@
 """Prepare the Slowrun FineWeb train/validation token files.
 
-This writes the same file schema used by qlabs-eng/slowrun:
+This writes the same logical schema used by qlabs-eng/slowrun:
 `tokens`, `doc_starts`, `bos_id`, `seq_shuffle_seed`, and `seq_size`.
 """
 
@@ -23,16 +23,15 @@ EXPECTED_HASHES = {
 }
 
 
-def _require_optional_deps():
+def _require_tqdm():
     try:
-        import torch
         from tqdm import tqdm
     except ImportError as exc:
         raise SystemExit(
             "Slowrun data preparation requires optional dependencies. "
-            "Install them with `uv sync --extra slowrun`."
+            "Install them with `uv sync --extra slowrun` or `pip install tqdm`."
         ) from exc
-    return torch, tqdm
+    return tqdm
 
 
 def tokenize_documents(dataset_iter, encoder, token_budget: int, tqdm):
@@ -52,14 +51,39 @@ def tokenize_documents(dataset_iter, encoder, token_budget: int, tqdm):
     return np.asarray(tokens[:token_budget], dtype=np.uint16), np.asarray(doc_starts, dtype=np.int64)
 
 
-def write_datafile(torch, filepath: str, tokens: np.ndarray, doc_starts: np.ndarray, bos_id: int, shuffle_seed: int):
+def _validate_data(tokens: np.ndarray, doc_starts: np.ndarray, bos_id: int):
     if tokens.size == 0:
-        raise ValueError(f"refusing to write empty token stream to {filepath}")
+        raise ValueError("refusing to write empty token stream")
     if doc_starts.size == 0 or doc_starts[0] != 0:
         raise ValueError("document starts must begin at 0")
     if not np.all(tokens[doc_starts] == bos_id):
         raise ValueError("document starts must point at BOS tokens")
 
+
+def write_npz_datafile(filepath: str, tokens: np.ndarray, doc_starts: np.ndarray, bos_id: int, shuffle_seed: int):
+    _validate_data(tokens, doc_starts, bos_id)
+    np.savez_compressed(
+        filepath,
+        tokens=tokens,
+        doc_starts=doc_starts,
+        bos_id=np.asarray(bos_id, dtype=np.int64),
+        seq_shuffle_seed=np.asarray(shuffle_seed, dtype=np.int64),
+        seq_size=np.asarray(SEQUENCE_LENGTH + 1, dtype=np.int64),
+        tokenizer=np.asarray("gpt2"),
+        source=np.asarray("HuggingFaceFW/fineweb:sample-10BT"),
+    )
+    print(f"Wrote {filepath}: {tokens.size:,} tokens, {doc_starts.size:,} docs")
+
+
+def write_pt_datafile(filepath: str, tokens: np.ndarray, doc_starts: np.ndarray, bos_id: int, shuffle_seed: int):
+    _validate_data(tokens, doc_starts, bos_id)
+    try:
+        import torch
+    except ImportError as exc:
+        raise SystemExit(
+            "Writing Slowrun `.pt` files requires torch. Use `--format npz` "
+            "for JAX-native data, or install torch."
+        ) from exc
     data = {
         "tokens": torch.from_numpy(tokens.copy()),
         "doc_starts": torch.from_numpy(doc_starts.copy()),
@@ -91,8 +115,34 @@ def verify_hash(filepath: str):
         print(f"{basename} hash OK: {actual}")
 
 
-def preprocess(train_tokens: int, val_tokens: int, local_dir: str, verify: bool):
-    torch, tqdm = _require_optional_deps()
+def write_datafiles(
+    local_dir: str,
+    file_format: str,
+    val_tokens_array: np.ndarray,
+    val_doc_starts: np.ndarray,
+    train_tokens_array: np.ndarray,
+    train_doc_starts: np.ndarray,
+    bos_id: int,
+):
+    formats = ["npz", "pt"] if file_format == "both" else [file_format]
+    paths = []
+    for fmt in formats:
+        val_path = os.path.join(local_dir, f"fineweb_val.{fmt}")
+        train_path = os.path.join(local_dir, f"fineweb_train.{fmt}")
+        if fmt == "npz":
+            write_npz_datafile(val_path, val_tokens_array, val_doc_starts, bos_id, VAL_SHUFFLE_SEED)
+            write_npz_datafile(train_path, train_tokens_array, train_doc_starts, bos_id, TRAIN_SHUFFLE_SEED)
+        elif fmt == "pt":
+            write_pt_datafile(val_path, val_tokens_array, val_doc_starts, bos_id, VAL_SHUFFLE_SEED)
+            write_pt_datafile(train_path, train_tokens_array, train_doc_starts, bos_id, TRAIN_SHUFFLE_SEED)
+        else:
+            raise ValueError(f"Unsupported format: {fmt}")
+        paths.extend([val_path, train_path])
+    return paths
+
+
+def preprocess(train_tokens: int, val_tokens: int, local_dir: str, verify: bool, file_format: str):
+    tqdm = _require_tqdm()
     encoder = tiktoken.get_encoding("gpt2")
     bos_id = encoder._special_tokens["<|endoftext|>"]
     os.makedirs(local_dir, exist_ok=True)
@@ -107,14 +157,19 @@ def preprocess(train_tokens: int, val_tokens: int, local_dir: str, verify: bool)
     train_tokens_array, train_doc_starts = tokenize_documents(dataset_iter, encoder, train_tokens, tqdm)
     del dataset_iter, dataset
 
-    val_path = os.path.join(local_dir, "fineweb_val.pt")
-    train_path = os.path.join(local_dir, "fineweb_train.pt")
-    write_datafile(torch, val_path, val_tokens_array, val_doc_starts, bos_id, VAL_SHUFFLE_SEED)
-    write_datafile(torch, train_path, train_tokens_array, train_doc_starts, bos_id, TRAIN_SHUFFLE_SEED)
+    paths = write_datafiles(
+        local_dir,
+        file_format,
+        val_tokens_array,
+        val_doc_starts,
+        train_tokens_array,
+        train_doc_starts,
+        bos_id,
+    )
 
     if verify:
-        verify_hash(val_path)
-        verify_hash(train_path)
+        for path in paths:
+            verify_hash(path)
 
 
 if __name__ == "__main__":
@@ -122,6 +177,7 @@ if __name__ == "__main__":
     parser.add_argument("--train-tokens", type=int, default=100_000_000)
     parser.add_argument("--val-tokens", type=int, default=10_000_000)
     parser.add_argument("--local-dir", type=str, default="fineweb_data")
+    parser.add_argument("--format", choices=["npz", "pt", "both"], default="npz")
     parser.add_argument("--no-verify", action="store_true")
     args = parser.parse_args()
 
@@ -130,4 +186,5 @@ if __name__ == "__main__":
         val_tokens=args.val_tokens,
         local_dir=args.local_dir,
         verify=not args.no_verify,
+        file_format=args.format,
     )

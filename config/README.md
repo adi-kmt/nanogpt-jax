@@ -29,6 +29,12 @@ TRAIN_CONFIG_PATH=config/model_config_small.yaml python train.py
 uv sync --extra slowrun
 uv run python prepare_slowrun_data.py
 TRAIN_CONFIG_PATH=config/model_config_slowrun.yaml uv run python train.py
+
+# Run exact full Slowrun validation from a checkpoint
+uv run python scripts/eval_slowrun.py \
+  --config config/model_config_slowrun.yaml \
+  --checkpoint checkpoints/slowrun/best_eval \
+  --full
 ```
 
 ## Creating Custom Configurations
@@ -56,14 +62,25 @@ Each YAML file can define four sections:
 - `batch_size`: Effective training batch size; must equal `micro_batch_size * grad_accum_steps`
 - `lr`: Learning rate
 - `epochs`: Number of training epochs
-- `optimizer`: Optimizer type ("adamw", etc.)
+- `scheduler`: Learning-rate schedule (`cosine`, `linear`, `wsd`, or `null`)
+- `final_lr_ratio`: End LR as a ratio of peak LR for decay schedules
+- `decay_steps`: Final warmdown length; defaults to the last 20% of the run
+- `weight_decay_schedule`: Weight-decay schedule (`constant`, `cosine`, `linear`, `wsd`, or `null`)
+- `final_weight_decay`: End weight decay for scheduled decay
+- `optimizer_groups`: Ordered first-match optimizer groups. Each group has `name`, `optimizer`, `match`, `lr_multiplier`, `weight_decay`, and `weight_decay_multiplier`.
+- Optimizer names: `adam`, `adamw`, `muon`, `frozen`; `dion` is accepted for future Optax support and currently fails clearly if selected.
+- Match rules: `rotary`, `embedding`, `head`, `norm`, `bias`, `matrix`, `non_matrix`, `decay`, `no_decay`, `default`, or `all`
 - `log_every`: Number of optimizer steps between train logs
 - `eval_every`: Number of optimizer steps between validation runs
 - `eval_steps`: Fixed number of eval batches; set to `null` to use `data.eval_tokens` or the full eval loader
+- `checkpoint_dir`: Directory for `best_eval`, `last`, and periodic checkpoints
+- `save_every`: Optional number of steps between periodic checkpoints
+- `save_best`, `save_last`: Toggle best/final checkpoint writes
 
 ### Data Configuration
 - `dataset`: `tinyshakespeare` or `slowrun`
-- `data_dir`: Directory containing Slowrun `fineweb_train.pt` and `fineweb_val.pt`
+- `data_dir`: Directory containing Slowrun `fineweb_train.npz`/`fineweb_val.npz` or `.pt` files
+- `data_format`: `auto`, `npz`, or `pt`; `auto` prefers `.npz`
 - `doc_shuffle`: Enables Slowrun-style document shuffling on the training split
 - `eval_tokens`: Validation token budget for Slowrun-style evaluation
 
@@ -71,6 +88,7 @@ Each YAML file can define four sections:
 - `enabled`: Enables or disables Weights & Biases logging
 - `project`, `group`, `tags`, `notes`: WandB run metadata
 - `save_code`: Uploads the current source tree to the WandB run
+- `log_checkpoints`: Uploads checkpoint directories as WandB artifacts when enabled
 
 ## Attention Types
 

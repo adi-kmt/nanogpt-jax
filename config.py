@@ -4,6 +4,20 @@ from pydantic import BaseModel, field_validator, model_validator
 
 
 ActivationType = Literal["relu", "gelu", "relu2", "silu", "swish", "identity", "swiglu"]
+OptimizerName = Literal["adam", "adamw", "muon", "dion", "frozen"]
+OptimizerMatch = Literal[
+    "all",
+    "default",
+    "matrix",
+    "non_matrix",
+    "embedding",
+    "norm",
+    "bias",
+    "head",
+    "rotary",
+    "decay",
+    "no_decay",
+]
 
 
 class GPTConfig(BaseModel):
@@ -83,6 +97,27 @@ class GPTConfig(BaseModel):
         return self
 
 
+class OptimizerGroupConfig(BaseModel):
+    name: str
+    optimizer: OptimizerName
+    match: list[OptimizerMatch]
+    lr_multiplier: float = 1.0
+    weight_decay: bool = True
+    weight_decay_multiplier: float = 1.0
+
+    @model_validator(mode="after")
+    def validate_optimizer_group(self):
+        if not self.name:
+            raise ValueError("optimizer group name must be non-empty")
+        if not self.match:
+            raise ValueError(f"optimizer group {self.name} must define at least one match rule")
+        if self.lr_multiplier < 0:
+            raise ValueError(f"optimizer group {self.name} lr_multiplier must be non-negative")
+        if self.weight_decay_multiplier < 0:
+            raise ValueError(f"optimizer group {self.name} weight_decay_multiplier must be non-negative")
+        return self
+
+
 class TrainingConfig(BaseModel):
     batch_size: int
     micro_batch_size: int
@@ -92,14 +127,30 @@ class TrainingConfig(BaseModel):
     weight_decay: float
     warmup_steps: int
     max_grad_norm: float
-    optimizer: Literal["adam", "adamw", "muon"]
-    scheduler: Literal["cosine", "linear"] | None
+    scheduler: Literal["cosine", "linear", "wsd"] | None
+    final_lr_ratio: float = 0.1
+    decay_steps: int | None = None
+    weight_decay_schedule: Literal["constant", "cosine", "linear", "wsd"] | None = "constant"
+    final_weight_decay: float | None = None
+    optimizer_groups: list[OptimizerGroupConfig]
+    adam_b1: float = 0.9
+    adam_b2: float = 0.95
+    adam_eps: float = 1e-8
+    muon_beta: float = 0.95
+    muon_ns_steps: int = 5
+    muon_nesterov: bool = True
+    muon_adaptive: bool = False
     grad_accum_steps: int
     log_every: int = 10
     eval_every: int | None = 500
     eval_steps: int | None = 50
     eval_on_start: bool = True
     eval_on_end: bool = True
+    checkpoint_dir: str = "checkpoints"
+    save_every: int | None = None
+    save_best: bool = True
+    save_last: bool = True
+    max_checkpoints_to_keep: int | None = 3
 
     @model_validator(mode="after")
     def validate_training_config(self):
@@ -115,6 +166,28 @@ class TrainingConfig(BaseModel):
             raise ValueError("weight_decay must be non-negative")
         if self.warmup_steps < 0:
             raise ValueError("warmup_steps must be non-negative")
+        if not 0 <= self.final_lr_ratio <= 1:
+            raise ValueError("final_lr_ratio must be between 0 and 1")
+        if self.decay_steps is not None and self.decay_steps <= 0:
+            raise ValueError("decay_steps must be positive when provided")
+        if self.final_weight_decay is not None and self.final_weight_decay < 0:
+            raise ValueError("final_weight_decay must be non-negative when provided")
+        names = [group.name for group in self.optimizer_groups]
+        if len(names) != len(set(names)):
+            raise ValueError("optimizer group names must be unique")
+        if not any(
+            "default" in group.match or "all" in group.match
+            for group in self.optimizer_groups
+        ):
+            raise ValueError("optimizer_groups must include a 'default' or 'all' catch-all group")
+        if not 0 <= self.adam_b1 < 1 or not 0 <= self.adam_b2 < 1:
+            raise ValueError("Adam betas must be in [0, 1)")
+        if self.adam_eps <= 0:
+            raise ValueError("adam_eps must be positive")
+        if not 0 <= self.muon_beta < 1:
+            raise ValueError("muon_beta must be in [0, 1)")
+        if self.muon_ns_steps <= 0:
+            raise ValueError("muon_ns_steps must be positive")
         if self.max_grad_norm <= 0:
             raise ValueError("max_grad_norm must be positive")
         if self.batch_size != self.micro_batch_size * self.grad_accum_steps:
@@ -125,6 +198,10 @@ class TrainingConfig(BaseModel):
             raise ValueError("eval_every must be positive when provided")
         if self.eval_steps is not None and self.eval_steps <= 0:
             raise ValueError("eval_steps must be positive when provided")
+        if self.save_every is not None and self.save_every <= 0:
+            raise ValueError("save_every must be positive when provided")
+        if self.max_checkpoints_to_keep is not None and self.max_checkpoints_to_keep <= 0:
+            raise ValueError("max_checkpoints_to_keep must be positive when provided")
         return self
 
 
@@ -133,6 +210,7 @@ class DataConfig(BaseModel):
     data_dir: str = "fineweb_data"
     train_path: Optional[str] = None
     val_path: Optional[str] = None
+    data_format: Literal["auto", "npz", "pt"] = "auto"
     tokenizer: Literal["gpt2"] = "gpt2"
     tinyshakespeare_url: str = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     train_split: float = 0.8
@@ -163,3 +241,5 @@ class WandbConfig(BaseModel):
     id: Optional[str] = None
     save_code: bool = True
     define_metrics: bool = True
+    log_checkpoints: bool = False
+    checkpoint_artifact_prefix: str = "checkpoint"
