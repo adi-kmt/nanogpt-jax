@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import jax
 from jaxtyping import Array, Float
 from config import GPTConfig
+from dtype_utils import dtype_from_name, param_dtype
 from jax import random
 
 activations = {
@@ -20,25 +21,58 @@ class Linear(eqx.Module):
     bias: Float[Array, "out_features"] | None
     in_features: int = eqx.field(static=True)
     out_features: int = eqx.field(static=True)
+    compute_dtype_name: str | None = eqx.field(static=True)
 
-    def __init__(self, in_features: int, out_features: int, key: jax.random.PRNGKey, use_bias: bool = True):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        key: jax.random.PRNGKey,
+        use_bias: bool = True,
+        dtype=None,
+        compute_dtype: str | None = None,
+    ):
         key1, key2 = jax.random.split(key)
 
         self.in_features = in_features
         self.out_features = out_features
+        self.compute_dtype_name = compute_dtype
 
-        limit = 1 / jnp.power(in_features, 0.5)
-        self.weight = random.uniform(key1, (out_features, in_features), minval=-limit, maxval=limit)
+        if dtype is None:
+            limit = 1 / jnp.power(in_features, 0.5)
+            self.weight = random.uniform(
+                key1, (out_features, in_features), minval=-limit, maxval=limit
+            )
+        else:
+            limit = jnp.asarray(1 / jnp.power(in_features, 0.5), dtype=dtype)
+            self.weight = random.uniform(
+                key1,
+                (out_features, in_features),
+                dtype=dtype,
+                minval=-limit,
+                maxval=limit,
+            )
 
         if use_bias:
-            self.bias = random.uniform(shape=(out_features,), key=key2)
+            if dtype is None:
+                self.bias = random.uniform(shape=(out_features,), key=key2)
+            else:
+                self.bias = random.uniform(shape=(out_features,), key=key2, dtype=dtype)
         else:
             self.bias = None
 
     def __call__(self, x: Float[Array, "batch seq_len d_model"]) -> Float[Array, "batch seq_len d_model"]:
-        result = jnp.einsum("...i,ji->...j", x, self.weight)
-        if self.bias is not None:
-            result += self.bias
+        compute_dtype = dtype_from_name(self.compute_dtype_name)
+        weight = self.weight
+        bias = self.bias
+        if compute_dtype is not None:
+            x = x.astype(compute_dtype)
+            weight = weight.astype(compute_dtype)
+            if bias is not None:
+                bias = bias.astype(compute_dtype)
+        result = jnp.einsum("...i,ji->...j", x, weight)
+        if bias is not None:
+            result += bias
         return result
 
 class MLP(eqx.Module):
@@ -53,12 +87,15 @@ class MLP(eqx.Module):
         activation_type = "silu" if config.activation_type == "swilu" else config.activation_type
         if activation_type != "swiglu" and activation_type not in activations:
             raise ValueError(f"Unsupported activation_type: {config.activation_type}")
+        weight_dtype = param_dtype(config)
 
         self.layer1 = Linear(
             config.d_model,
             config.linear_d_hidden,
             key=key1,
             use_bias=config.use_bias,
+            dtype=weight_dtype,
+            compute_dtype=config.compute_dtype,
         )
         self.gate = (
             Linear(
@@ -66,6 +103,8 @@ class MLP(eqx.Module):
                 config.linear_d_hidden,
                 key=key2,
                 use_bias=config.use_bias,
+                dtype=weight_dtype,
+                compute_dtype=config.compute_dtype,
             )
             if activation_type == "swiglu"
             else None
@@ -75,6 +114,8 @@ class MLP(eqx.Module):
             config.d_model,
             key=key3,
             use_bias=config.use_bias,
+            dtype=weight_dtype,
+            compute_dtype=config.compute_dtype,
         )
         self.activation_type = activation_type
         self.dropout = eqx.nn.Dropout(config.dropout_p)

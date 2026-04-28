@@ -19,6 +19,7 @@ from checkpoint_utils import (
     save_checkpoint,
     stable_hash,
 )
+from dtype_utils import cast_floating_tree_like
 from nanogpt import init_model_weights, NanoGPT, debug_model_init
 from data_utils import create_dataloader, describe_data_artifacts, gpt2_token_bytes, setup_sharding
 from optimizers import (
@@ -152,7 +153,7 @@ def compute_loss_and_grads_safe(model, inputs, targets, key):
 
     def loss_fn(model):
         # Forward pass
-        logits = model(inputs, key=key, inference=False)  # [B, T, V]
+        logits = model(inputs, key=key, inference=False).astype(jnp.float32)  # [B, T, V]
 
         # Basic numerical stability for logits
         logits = jnp.where(jnp.isnan(logits), 0.0, logits)
@@ -190,7 +191,7 @@ def compute_loss_and_grads_safe(model, inputs, targets, key):
 
 @eqx.filter_jit
 def eval_batch_metrics(model, inputs, targets, token_bytes, key):
-    logits = model(inputs, key=key, inference=True)
+    logits = model(inputs, key=key, inference=True).astype(jnp.float32)
     logits = jnp.where(jnp.isnan(logits), 0.0, logits)
     logits = jnp.where(jnp.isinf(logits), jnp.sign(logits) * 10.0, logits)
     logits = jnp.clip(logits, -10.0, 10.0)
@@ -292,6 +293,7 @@ def training_step_jit_safe(model, batch_data, data_sharding, optimizer, opt_stat
 
     params = eqx.filter(model, eqx.is_array)
     updates, candidate_opt_state = optimizer.update(safe_grads, opt_state, params)
+    updates = cast_floating_tree_like(updates, params)
     candidate_model = eqx.apply_updates(model, updates)
 
     def select_if_update(new, old):

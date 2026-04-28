@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import optax
 
 from config import OptimizerGroupConfig, TrainingConfig
+from dtype_utils import dtype_from_name
 
 
 Schedule = Callable[[jax.Array], jax.Array]
@@ -203,6 +204,7 @@ def _adam_chain(
             b1=config.adam_b1,
             b2=config.adam_b2,
             eps=config.adam_eps,
+            mu_dtype=dtype_from_name(config.optimizer_state_dtype),
         ),
         optax.scale_by_learning_rate(lr_schedule),
     ])
@@ -219,6 +221,7 @@ def _adamw_chain(
             b1=config.adam_b1,
             b2=config.adam_b2,
             eps=config.adam_eps,
+            mu_dtype=dtype_from_name(config.optimizer_state_dtype),
         )
     ]
     if weight_decay_schedule is not None:
@@ -237,6 +240,7 @@ def _muon_chain(
             ns_steps=config.muon_ns_steps,
             beta=config.muon_beta,
             eps=config.adam_eps,
+            mu_dtype=dtype_from_name(config.optimizer_state_dtype),
             nesterov=config.muon_nesterov,
             adaptive=config.muon_adaptive,
         )

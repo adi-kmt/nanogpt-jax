@@ -6,6 +6,7 @@ from einops import rearrange
 from jaxtyping import Array, Float, Bool
 
 from config import GPTConfig
+from dtype_utils import param_dtype
 from layers import Linear
 from norms import norm_without_weight
 from positional_embeddings import Rotary
@@ -39,11 +40,12 @@ class MultiHeadAttention(eqx.Module):
         _validate_head_dimensions(config)
         key1, key2, key3, key4 = jax.random.split(key, 4)
         self.config = config
-        self.w_q = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key1)
-        self.w_k = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key2)
-        self.w_v = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key3)
-        self.w_o = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key4)
-        self.rotary = Rotary(dim=config.d_head, max_seq_len=config.max_seq_len)
+        weight_dtype = param_dtype(config)
+        self.w_q = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key1, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_k = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key2, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_v = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key3, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_o = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key4, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.rotary = Rotary(dim=config.d_head, max_seq_len=config.max_seq_len, dtype=weight_dtype)
 
     def __call__(self, x: Float[Array, "batch seq_len d_model"], key: jax.random.PRNGKey,
                  mask: Bool[Array, "seq_len seq_len"]) -> Float[Array, "batch seq_len d_model"]:
@@ -74,7 +76,7 @@ class MultiHeadAttention(eqx.Module):
         k_transposed = jnp.transpose(k, (0, 2, 1, 3))  # [B, H, T, D]
         v_transposed = jnp.transpose(v, (0, 2, 1, 3))  # [B, H, T, D]
 
-        attn_scores = jnp.einsum('b h s d, b h t d -> b h s t', q_transposed, k_transposed)
+        attn_scores = jnp.einsum('b h s d, b h t d -> b h s t', q_transposed, k_transposed).astype(jnp.float32)
         attn_scores = attn_scores / jnp.sqrt(self.config.d_head)
 
         # Apply causal mask
@@ -111,11 +113,12 @@ class GroupQueryAttention(eqx.Module):
         _validate_gqa_dimensions(config)
         key1, key2, key3, key4 = jax.random.split(key, 4)
         self.config = config
-        self.w_q = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key1)
-        self.w_k = Linear(config.d_model, (config.n_kv_heads * config.d_head), use_bias=config.use_bias, key=key2)
-        self.w_v = Linear(config.d_model, (config.n_kv_heads * config.d_head), use_bias=config.use_bias, key=key3)
-        self.w_o = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key4)
-        self.rotary = Rotary(dim=config.d_head, max_seq_len=config.max_seq_len)
+        weight_dtype = param_dtype(config)
+        self.w_q = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key1, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_k = Linear(config.d_model, (config.n_kv_heads * config.d_head), use_bias=config.use_bias, key=key2, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_v = Linear(config.d_model, (config.n_kv_heads * config.d_head), use_bias=config.use_bias, key=key3, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_o = Linear(config.d_model, config.d_model, use_bias=config.use_bias, key=key4, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.rotary = Rotary(dim=config.d_head, max_seq_len=config.max_seq_len, dtype=weight_dtype)
 
     def __call__(self, x: Float[Array, "batch seq_len d_model"], key: jax.random.PRNGKey,
                  mask: Bool[Array, "seq_len seq_len"] = None) -> Float[Array, "batch seq_len d_model"]:
@@ -149,7 +152,7 @@ class GroupQueryAttention(eqx.Module):
         k_transposed = jnp.transpose(k, (0, 2, 1, 3))  # [B, H, T, D]
         v_transposed = jnp.transpose(v, (0, 2, 1, 3))  # [B, H, T, D]
 
-        attn_scores = jnp.einsum('b h s d, b h t d -> b h s t', q_transposed, k_transposed)
+        attn_scores = jnp.einsum('b h s d, b h t d -> b h s t', q_transposed, k_transposed).astype(jnp.float32)
         attn_scores = attn_scores / jnp.sqrt(self.config.d_head)
 
         # Apply causal mask
@@ -195,16 +198,17 @@ class MHLA(eqx.Module):
         self.mhla_config = mhla_config
 
         k1, k2, k3, k4, k5, k6, k7, k8 = jax.random.split(key, 8)
-        self.w_dq = Linear(config.d_model, mhla_config.d_c1, use_bias=False, key=k1)
-        self.w_uq = Linear(mhla_config.d_c1, config.d_model, use_bias=False, key=k2)
-        self.w_rq = Linear(mhla_config.d_c1, config.n_heads * mhla_config.d_r, use_bias=False, key=k3)
-        self.w_dkv = Linear(config.d_model, mhla_config.d_c, use_bias=False, key=k4)
-        self.w_rk = Linear(config.d_model, mhla_config.d_r, use_bias=False, key=k5)
-        self.w_uk = Linear(mhla_config.d_c, config.d_model, use_bias=False, key=k6)
-        self.w_uv = Linear(mhla_config.d_c, config.d_model, use_bias=False, key=k7)
-        self.w_o = Linear(config.d_model, config.d_model, use_bias=False, key=k8)
+        weight_dtype = param_dtype(config)
+        self.w_dq = Linear(config.d_model, mhla_config.d_c1, use_bias=False, key=k1, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_uq = Linear(mhla_config.d_c1, config.d_model, use_bias=False, key=k2, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_rq = Linear(mhla_config.d_c1, config.n_heads * mhla_config.d_r, use_bias=False, key=k3, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_dkv = Linear(config.d_model, mhla_config.d_c, use_bias=False, key=k4, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_rk = Linear(config.d_model, mhla_config.d_r, use_bias=False, key=k5, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_uk = Linear(mhla_config.d_c, config.d_model, use_bias=False, key=k6, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_uv = Linear(mhla_config.d_c, config.d_model, use_bias=False, key=k7, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_o = Linear(config.d_model, config.d_model, use_bias=False, key=k8, dtype=weight_dtype, compute_dtype=config.compute_dtype)
 
-        self.rotary = Rotary(dim=mhla_config.d_r, max_seq_len=config.max_seq_len)
+        self.rotary = Rotary(dim=mhla_config.d_r, max_seq_len=config.max_seq_len, dtype=weight_dtype)
 
     def __call__(
         self,
@@ -255,7 +259,7 @@ class MHLA(eqx.Module):
         v_state = rearrange(v_state, "b t h d -> b h t d")
 
         # Attention: Q @ K^T
-        attn_scores = jnp.einsum("b h s d, b h t d -> b h s t", q_final, k_final)
+        attn_scores = jnp.einsum("b h s d, b h t d -> b h s t", q_final, k_final).astype(jnp.float32)
         attn_scores = attn_scores / jnp.sqrt(self.config.d_head + self.mhla_config.d_r)
 
         # Mask
@@ -295,15 +299,16 @@ class VoMHLA(eqx.Module):
         self.mhla_config = mhla_config
 
         k1, k2, k3, k4, k5, k6 = jax.random.split(key, 6)
-        self.w_dq = Linear(config.d_model, mhla_config.d_c1, use_bias=False, key=k1)
-        self.w_uq = Linear(mhla_config.d_c1, config.d_model, use_bias=False, key=k2)
-        self.w_dkv = Linear(config.d_model, mhla_config.d_c, use_bias=False, key=k3)
-        self.w_uk = Linear(mhla_config.d_c, config.d_model, use_bias=False, key=k4)
-        self.w_uv = Linear(mhla_config.d_c, config.d_model, use_bias=False, key=k5)
-        self.w_o = Linear(config.d_model, config.d_model, use_bias=False, key=k6)
+        weight_dtype = param_dtype(config)
+        self.w_dq = Linear(config.d_model, mhla_config.d_c1, use_bias=False, key=k1, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_uq = Linear(mhla_config.d_c1, config.d_model, use_bias=False, key=k2, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_dkv = Linear(config.d_model, mhla_config.d_c, use_bias=False, key=k3, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_uk = Linear(mhla_config.d_c, config.d_model, use_bias=False, key=k4, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_uv = Linear(mhla_config.d_c, config.d_model, use_bias=False, key=k5, dtype=weight_dtype, compute_dtype=config.compute_dtype)
+        self.w_o = Linear(config.d_model, config.d_model, use_bias=False, key=k6, dtype=weight_dtype, compute_dtype=config.compute_dtype)
 
         # Rotary embedding dimension should match d_head
-        self.rotary = Rotary(dim=config.d_head, max_seq_len=config.max_seq_len)
+        self.rotary = Rotary(dim=config.d_head, max_seq_len=config.max_seq_len, dtype=weight_dtype)
 
     def __call__(
             self,
@@ -343,7 +348,7 @@ class VoMHLA(eqx.Module):
         k_final = rearrange(k_final, "b t h d -> b h t d")
 
         # Attention: Q @ K^T
-        attn_scores = jnp.einsum("b h s d, b h t d -> b h s t", q_final, k_final)
+        attn_scores = jnp.einsum("b h s d, b h t d -> b h s t", q_final, k_final).astype(jnp.float32)
         attn_scores = attn_scores / jnp.sqrt(self.config.d_head)
 
         # Mask

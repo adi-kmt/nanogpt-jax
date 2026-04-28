@@ -1,24 +1,42 @@
-# Slowrun FineWeb configuration. Prepare data first:
-#   uv sync --extra slowrun
-#   uv run python prepare_slowrun_data.py
+# Full configuration template.
+# Copy this file and edit the values for a real run:
+#   cp config/model_config_template.yaml config/my_run.yaml
+#   TRAIN_CONFIG_PATH=config/my_run.yaml uv run python train.py
+
 model:
+  # Activations: gelu, relu, relu2, silu, swish, identity, swiglu
   activation_type: "swiglu"
   dropout_p: 0.1
+
   d_model: 512
   linear_d_hidden: 2048
   norm_eps: 1e-5
   use_bias: true
   use_qkNorm: false
   tie_word_embeddings: true
+
+  # Rotary still uses integer token positions; its stored tables follow param_dtype.
   use_rotary: true
   max_seq_len: 2048
+
   n_heads: 16
   d_head: 32
   n_kv_heads: null
   n_layers: 12
   vocab_size: 50257
+
+  # Attention: mha, gqa, mhla, vo-mhla
   attention_type: "mha"
   mhla_config: null
+  # Example for MHLA:
+  # attention_type: "mhla"
+  # mhla_config:
+  #   d_c: 256
+  #   d_c1: 256
+  #   d_r: 16
+
+  # Dtypes: float32, bfloat16, float16.
+  # Token IDs stay integer. Loss upcasts logits to float32 internally.
   param_dtype: "bfloat16"
   compute_dtype: "bfloat16"
   logits_dtype: "bfloat16"
@@ -29,36 +47,55 @@ training:
   eval_batch_size: 1
   grad_accum_steps: 8
   epochs: 1
+
   lr: 3e-4
   weight_decay: 0.1
   max_grad_norm: 1.0
   warmup_steps: 100
+
+  # Scheduler: cosine, linear, wsd, or null.
   scheduler: "wsd"
   final_lr_ratio: 0.1
   decay_steps: null
+
+  # Weight-decay schedule: constant, cosine, linear, wsd, or null.
   weight_decay_schedule: "wsd"
   final_weight_decay: 0.0
+
+  # Optimizer accumulator dtype. Float32 is usually best even with bf16 params.
+  optimizer_state_dtype: "float32"
+
+  # Ordered first-match optimizer groups.
+  # Match rules: rotary, embedding, head, norm, bias, matrix, non_matrix,
+  # decay, no_decay, default, all.
+  # Optimizers: frozen, adam, adamw, muon. dion is reserved for future Optax support.
   optimizer_groups:
     - name: "frozen"
       optimizer: "frozen"
       match: ["rotary"]
       lr_multiplier: 0.0
       weight_decay: false
+
     - name: "adamw_no_decay"
       optimizer: "adamw"
       match: ["no_decay"]
       lr_multiplier: 1.0
       weight_decay: false
+
     - name: "muon_matrix"
       optimizer: "muon"
       match: ["matrix"]
       lr_multiplier: 1.0
       weight_decay: true
+      weight_decay_multiplier: 1.0
+
     - name: "adamw_default"
       optimizer: "adamw"
       match: ["default"]
       lr_multiplier: 1.0
       weight_decay: true
+      weight_decay_multiplier: 1.0
+
   adam_b1: 0.9
   adam_b2: 0.95
   adam_eps: 1e-8
@@ -66,32 +103,46 @@ training:
   muon_ns_steps: 5
   muon_nesterov: true
   muon_adaptive: false
-  optimizer_state_dtype: "float32"
+
   log_every: 10
   eval_every: 500
   eval_steps: null
   eval_on_start: true
   eval_on_end: true
-  checkpoint_dir: "checkpoints/slowrun"
+
+  checkpoint_dir: "checkpoints/template"
   save_every: null
   save_best: true
   save_last: true
   max_checkpoints_to_keep: 3
 
 data:
+  # dataset: tinyshakespeare or slowrun
   dataset: "slowrun"
   data_dir: "fineweb_data"
+  train_path: null
+  val_path: null
   data_format: "auto"
   tokenizer: "gpt2"
+  tinyshakespeare_url: "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+  train_split: 0.8
+  seed: 42
   doc_shuffle: true
   eval_tokens: 10000000
-  seed: 42
 
 logging:
   enabled: true
   project: "nanogpt-jax-slowrun"
-  group: "slowrun"
+  entity: null
+  name: null
+  group: "template"
   job_type: "train"
-  tags: ["slowrun", "fineweb", "jax"]
+  mode: null
+  tags: ["template", "slowrun", "jax", "bf16", "muon"]
+  notes: null
+  resume: "allow"
+  id: null
   save_code: true
+  define_metrics: true
   log_checkpoints: false
+  checkpoint_artifact_prefix: "checkpoint"

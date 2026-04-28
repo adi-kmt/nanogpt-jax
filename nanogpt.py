@@ -7,6 +7,7 @@ from config import GPTConfig
 
 from attention_factory import create_attention
 from attentions import MultiHeadAttention, GroupQueryAttention, MHLA, VoMHLA
+from dtype_utils import compute_dtype, logits_dtype, param_dtype
 from layers import MLP, Linear
 from norms import RMSNorm
 
@@ -56,9 +57,10 @@ class NanoGPT(eqx.Module):
     def __init__(self, config: GPTConfig, key: jax.random.PRNGKey):
         self.config = config
         key, *subkeys = jax.random.split(key, 1 + config.n_layers + 1)
+        weight_dtype = param_dtype(config)
 
         self.wte = eqx.nn.Embedding(
-            config.vocab_size, config.d_model, key=subkeys[0]
+            config.vocab_size, config.d_model, dtype=weight_dtype, key=subkeys[0]
         )
         self.blocks = [
             DecoderBlock(config, key=subkeys[i + 1]) for i in range(config.n_layers)
@@ -70,7 +72,9 @@ class NanoGPT(eqx.Module):
                 config.d_model,
                 config.vocab_size,
                 key=subkeys[-1],
-                use_bias=False
+                use_bias=False,
+                dtype=weight_dtype,
+                compute_dtype=config.compute_dtype,
             )
         else:
             self.lm_head = None
@@ -83,6 +87,7 @@ class NanoGPT(eqx.Module):
         inference: bool = True,
     ) -> Float[Array, "batch seq_len vocab_size"]:
         x = jax.vmap(jax.vmap(self.wte))(input_ids)
+        x = x.astype(compute_dtype(self.config))
 
         B, T = x.shape[:2]
         if mask is None:
@@ -95,11 +100,12 @@ class NanoGPT(eqx.Module):
         x = self.final_norm(x)
 
         if self.config.tie_word_embeddings:
-            logits = jnp.einsum("b t d, v d -> b t v", x, self.wte.weight)
+            weight = self.wte.weight.astype(x.dtype)
+            logits = jnp.einsum("b t d, v d -> b t v", x, weight)
         else:
             logits = self.lm_head(x)
 
-        return logits
+        return logits.astype(logits_dtype(self.config))
 
 
 def init_model_weights(model, key, config):
@@ -110,6 +116,18 @@ def init_model_weights(model, key, config):
     key_iter = iter(keys)
 
     n_layers = config.n_layers
+    target_dtype = param_dtype(config)
+
+    def normal(shape, k, std):
+        return jax.random.normal(k, shape, dtype=target_dtype) * jnp.asarray(
+            std, dtype=target_dtype
+        )
+
+    def zeros(shape):
+        return jnp.zeros(shape, dtype=target_dtype)
+
+    def ones(shape):
+        return jnp.ones(shape, dtype=target_dtype)
 
     # ✅ CRITICAL: Depth-aware scaling factors
     depth_scale = 1.0 / jnp.sqrt(n_layers)  # Scale down with depth
@@ -130,66 +148,59 @@ def init_model_weights(model, key, config):
 
         if 'wte' in path_names or 'wpe' in path_names:
             std = 0.01 * depth_scale  # Much smaller for deep networks
-            result = jax.random.normal(k, shape) * std
             print(f"  -> Embedding: std={std:.5f}")
-            return result
+            return normal(shape, k, std)
 
         elif 'bias' in path_names:
             print(f"  -> Bias: zeros")
-            return jnp.zeros(shape)
+            return zeros(shape)
 
         elif any(n in path_names for n in ['attn_norm', 'ffn_norm', 'final_norm']):
             if 'weight' in path_names:
                 print(f"  -> Norm weight: ones")
-                return jnp.ones(shape)
-            return jnp.zeros(shape)
+                return ones(shape)
+            return zeros(shape)
 
         elif any(w in path_names for w in ['w_q', 'w_k', 'w_v']):
             # Use much smaller initialization for deep networks
             fan_in = shape[-1]
             std = (0.02 / jnp.sqrt(fan_in)) * depth_scale
-            result = jax.random.normal(k, shape) * std
             print(f"  -> QKV: std={std:.6f} (depth_scale={depth_scale:.3f})")
-            return result
+            return normal(shape, k, std)
 
         elif 'w_o' in path_names:
             fan_in = shape[-1]
             std = (0.01 / jnp.sqrt(fan_in)) * residual_scale
-            result = jax.random.normal(k, shape) * std
             print(f"  -> Output proj: std={std:.6f} (residual_scale={residual_scale:.3f})")
-            return result
+            return normal(shape, k, std)
 
         elif 'layer1' in path_names or 'gate' in path_names:
             fan_in = shape[-1]
             std = jnp.sqrt(2.0 / fan_in) * depth_scale * 0.5
-            result = jax.random.normal(k, shape) * std
             print(f"  -> MLP input proj: std={std:.6f}")
-            return result
+            return normal(shape, k, std)
 
         elif 'layer2' in path_names:
             fan_in = shape[-1]
             std = (0.01 / jnp.sqrt(fan_in)) * residual_scale
-            result = jax.random.normal(k, shape) * std
             print(f"  -> MLP layer2: std={std:.6f} (residual)")
-            return result
+            return normal(shape, k, std)
 
         elif 'lm_head' in path_names and 'weight' in path_names:
             if config.tie_word_embeddings:
                 return param
             std = 0.01 * depth_scale
-            result = jax.random.normal(k, shape) * std
             print(f"  -> LM head: std={std:.5f}")
-            return result
+            return normal(shape, k, std)
 
         if len(shape) >= 2:
             fan_in = shape[-1]
             std = (0.01 / jnp.sqrt(fan_in)) * depth_scale
-            result = jax.random.normal(k, shape) * std
             print(f"  -> Fallback: std={std:.6f}")
-            return result
+            return normal(shape, k, std)
 
         print(f"  -> Zeros fallback")
-        return jnp.zeros(shape)
+        return zeros(shape)
 
     # Apply initialization
     new_params = jax.tree_util.tree_map_with_path(init_param, params)

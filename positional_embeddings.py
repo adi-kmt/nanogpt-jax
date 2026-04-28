@@ -9,7 +9,7 @@ class Rotary(eqx.Module):
     dim: int = eqx.field(static=True)
     max_seq_len: int = eqx.field(static=True)
 
-    def __init__(self, dim: int, max_seq_len: int):
+    def __init__(self, dim: int, max_seq_len: int, dtype=None):
         if dim <= 0:
             raise ValueError("Rotary dim must be positive")
         if dim % 2 != 0:
@@ -20,14 +20,17 @@ class Rotary(eqx.Module):
         half_dim = dim // 2
         rotated_dim = max(1, half_dim // 2)
 
-        angular_freq = (1 / 1024) ** jnp.linspace(0, 1, rotated_dim, dtype=jnp.float32)
+        table_dtype = jnp.float32 if dtype is None else dtype
+        angular_freq = jnp.asarray(1 / 1024, dtype=table_dtype) ** jnp.linspace(
+            0, 1, rotated_dim, dtype=table_dtype
+        )
         angular_freq = jnp.concatenate([
             angular_freq,
-            jnp.zeros((half_dim - rotated_dim,), dtype=jnp.float32),
+            jnp.zeros((half_dim - rotated_dim,), dtype=table_dtype),
         ])
 
         # Step 3: Outer product: t[i] * angular_freq[j]
-        t = jnp.arange(max_seq_len, dtype=jnp.float32)
+        t = jnp.arange(max_seq_len, dtype=table_dtype)
         theta = jnp.outer(t, angular_freq)  # [max_seq_len, dim//2]
 
         # Step 4: Precompute cos and sin

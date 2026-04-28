@@ -2,6 +2,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, field_validator, model_validator
 
+from dtype_utils import DTypeName
+
 
 ActivationType = Literal["relu", "gelu", "relu2", "silu", "swish", "identity", "swiglu"]
 OptimizerName = Literal["adam", "adamw", "muon", "dion", "frozen"]
@@ -46,6 +48,9 @@ class GPTConfig(BaseModel):
     # Attention type configuration
     attention_type: Literal["mha", "gqa", "mhla", "vo-mhla"] = "mha"
     mhla_config: Optional["GPTConfig.MhlaConfig"] = None
+    param_dtype: DTypeName = "float32"
+    compute_dtype: DTypeName | None = None
+    logits_dtype: DTypeName = "float32"
 
     class MhlaConfig(BaseModel):
         d_c: int
@@ -140,6 +145,7 @@ class TrainingConfig(BaseModel):
     muon_ns_steps: int = 5
     muon_nesterov: bool = True
     muon_adaptive: bool = False
+    optimizer_state_dtype: DTypeName | None = "float32"
     grad_accum_steps: int
     log_every: int = 10
     eval_every: int | None = 500

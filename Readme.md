@@ -21,7 +21,9 @@ TRAIN_CONFIG_PATH=config/model_config_slowrun.yaml uv run python train.py
 
 `prepare_slowrun_data.py` writes JAX-friendly `.npz` files by default. Use `--format pt` or `--format both` only when you need compatibility with the original Slowrun PyTorch artifact format.
 
-The Slowrun config uses WSD learning-rate decay, scheduled weight decay, and ordered optimizer groups: precomputed RoPE tables are frozen, no-decay parameters use AdamW, and matrix weights use Muon. Each group can set its own LR and weight-decay multiplier.
+The Slowrun config uses `bfloat16` parameters/compute/logits with float32 optimizer state. Token IDs stay integer. Training and eval upcast logits to float32 for cross-entropy stability.
+
+The Slowrun config also uses WSD learning-rate decay, scheduled weight decay, and ordered optimizer groups: precomputed RoPE tables are frozen, no-decay parameters use AdamW, and matrix weights use Muon. Each group can set its own LR and weight-decay multiplier.
 
 Training writes `best_eval` and `last` checkpoints under `training.checkpoint_dir`. Exact validation can be run later with:
 

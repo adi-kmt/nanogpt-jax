@@ -10,6 +10,7 @@ The configuration files are located in the `config/` directory:
 2. `model_config_mhla.yaml` - Model configuration with MHLA attention
 3. `model_config_small.yaml` - Small model configuration for smoke tests
 4. `model_config_slowrun.yaml` - FineWeb/Slowrun competition data configuration
+5. `model_config_template.yaml` - Fully annotated template with dtype, optimizer groups, checkpoints, data, and W&B settings
 
 ## Running Training with Different Configurations
 
@@ -29,6 +30,10 @@ TRAIN_CONFIG_PATH=config/model_config_small.yaml python train.py
 uv sync --extra slowrun
 uv run python prepare_slowrun_data.py
 TRAIN_CONFIG_PATH=config/model_config_slowrun.yaml uv run python train.py
+
+# Start a new run from the full template
+cp config/model_config_template.yaml config/my_run.yaml
+TRAIN_CONFIG_PATH=config/my_run.yaml uv run python train.py
 
 # Run exact full Slowrun validation from a checkpoint
 uv run python scripts/eval_slowrun.py \
@@ -57,6 +62,9 @@ Each YAML file can define four sections:
 - `n_heads`: Number of attention heads
 - `attention_type`: Attention mechanism (`mha`, `gqa`, `mhla`, or `vo-mhla`)
 - `mhla_config`: MHLA-specific parameters (only needed for MHLA attention)
+- `param_dtype`: Stored floating parameter dtype (`float32`, `bfloat16`, or `float16`)
+- `compute_dtype`: Forward activation/matmul dtype; set `null` to follow `param_dtype`
+- `logits_dtype`: Dtype returned by the model head; training/eval loss still upcasts logits to float32
 
 ### Training Configuration
 - `batch_size`: Effective training batch size; must equal `micro_batch_size * grad_accum_steps`
@@ -70,6 +78,7 @@ Each YAML file can define four sections:
 - `optimizer_groups`: Ordered first-match optimizer groups. Each group has `name`, `optimizer`, `match`, `lr_multiplier`, `weight_decay`, and `weight_decay_multiplier`.
 - Optimizer names: `adam`, `adamw`, `muon`, `frozen`; `dion` is accepted for future Optax support and currently fails clearly if selected.
 - Match rules: `rotary`, `embedding`, `head`, `norm`, `bias`, `matrix`, `non_matrix`, `decay`, `no_decay`, `default`, or `all`
+- `optimizer_state_dtype`: Adam/Muon accumulator dtype; `float32` is recommended even when `param_dtype` is `bfloat16`
 - `log_every`: Number of optimizer steps between train logs
 - `eval_every`: Number of optimizer steps between validation runs
 - `eval_steps`: Fixed number of eval batches; set to `null` to use `data.eval_tokens` or the full eval loader

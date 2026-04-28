@@ -12,7 +12,8 @@ from checkpoint_utils import (
 )
 from config import DataConfig, GPTConfig, TrainingConfig
 from data_utils import SlowRunDataLoader, describe_data_artifacts
-from nanogpt import NanoGPT
+from nanogpt import NanoGPT, init_model_weights
+from train import compute_loss_and_grads_safe, training_step_jit_safe
 from optimizers import (
     create_learning_rate_schedule,
     create_optimizer,
@@ -358,6 +359,127 @@ def test_rotary_tables_are_true_constants_for_gradients():
 
     assert jnp.allclose(grads.blocks[0].attn.rotary.cos, 0.0)
     assert jnp.allclose(grads.blocks[0].attn.rotary.sin, 0.0)
+
+
+def test_model_dtype_config_casts_float_params_and_logits():
+    config = tiny_model_config(
+        param_dtype="bfloat16",
+        compute_dtype="bfloat16",
+        logits_dtype="bfloat16",
+    )
+    model = NanoGPT(config, key=jax.random.PRNGKey(0))
+    float_leaves = [
+        leaf
+        for leaf in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array))
+        if jnp.issubdtype(leaf.dtype, jnp.inexact)
+    ]
+    assert float_leaves
+    assert {leaf.dtype for leaf in float_leaves} == {jnp.dtype(jnp.bfloat16)}
+
+    input_ids = jnp.arange(8, dtype=jnp.int32).reshape(1, 8)
+    logits = model(input_ids, key=jax.random.PRNGKey(1), inference=True)
+    assert logits.dtype == jnp.bfloat16
+
+
+def test_custom_init_preserves_configured_parameter_dtype():
+    config = tiny_model_config(
+        param_dtype="bfloat16",
+        compute_dtype="bfloat16",
+        logits_dtype="bfloat16",
+    )
+    model = NanoGPT(config, key=jax.random.PRNGKey(0))
+    model = init_model_weights(model, key=jax.random.PRNGKey(1), config=config)
+    float_leaves = [
+        leaf
+        for leaf in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array))
+        if jnp.issubdtype(leaf.dtype, jnp.inexact)
+    ]
+
+    assert float_leaves
+    assert {leaf.dtype for leaf in float_leaves} == {jnp.dtype(jnp.bfloat16)}
+
+
+def test_loss_upcasts_bf16_logits_for_stability():
+    config = tiny_model_config(
+        param_dtype="bfloat16",
+        compute_dtype="bfloat16",
+        logits_dtype="bfloat16",
+    )
+    model = NanoGPT(config, key=jax.random.PRNGKey(0))
+    inputs = jnp.arange(8, dtype=jnp.int32).reshape(1, 8)
+    targets = jnp.roll(inputs, shift=-1, axis=1)
+    loss, grads = compute_loss_and_grads_safe(model, inputs, targets, jax.random.PRNGKey(1))
+
+    assert loss.dtype == jnp.float32
+    assert jnp.isfinite(loss)
+    assert all(
+        jnp.all(jnp.isfinite(leaf))
+        for leaf in jax.tree_util.tree_leaves(eqx.filter(grads, eqx.is_array))
+    )
+
+
+def test_optimizer_state_dtype_can_stay_float32_with_bf16_params():
+    model = NanoGPT(tiny_model_config(param_dtype="bfloat16"), key=jax.random.PRNGKey(0))
+    params = eqx.filter(model, eqx.is_array)
+    config = tiny_train_config(
+        scheduler=None,
+        warmup_steps=0,
+        optimizer_state_dtype="float32",
+    )
+    optimizer = create_optimizer(
+        config,
+        create_learning_rate_schedule(config, total_steps=2),
+        create_weight_decay_schedule(config, total_steps=2),
+        model,
+    )
+    opt_state = optimizer.init(params)
+    inexact_state_dtypes = {
+        leaf.dtype
+        for leaf in jax.tree_util.tree_leaves(opt_state)
+        if eqx.is_array(leaf) and jnp.issubdtype(leaf.dtype, jnp.inexact)
+    }
+
+    assert jnp.dtype(jnp.float32) in inexact_state_dtypes
+
+
+def test_training_step_preserves_bf16_parameter_dtype():
+    model_config = tiny_model_config(
+        param_dtype="bfloat16",
+        compute_dtype="bfloat16",
+        logits_dtype="bfloat16",
+    )
+    model = NanoGPT(model_config, key=jax.random.PRNGKey(0))
+    train_config = tiny_train_config(
+        scheduler=None,
+        warmup_steps=0,
+        optimizer_state_dtype="float32",
+    )
+    optimizer = create_optimizer(
+        train_config,
+        create_learning_rate_schedule(train_config, total_steps=2),
+        create_weight_decay_schedule(train_config, total_steps=2),
+        model,
+    )
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+    sharding = jax.sharding.SingleDeviceSharding(jax.devices()[0])
+    inputs = jnp.arange(8, dtype=jnp.int32).reshape(1, 8)
+    targets = jnp.roll(inputs, shift=-1, axis=1)
+
+    new_model, _, _, _, _ = training_step_jit_safe(
+        model,
+        [(inputs, targets)],
+        sharding,
+        optimizer,
+        opt_state,
+        jax.random.PRNGKey(1),
+    )
+    float_leaves = [
+        leaf
+        for leaf in jax.tree_util.tree_leaves(eqx.filter(new_model, eqx.is_array))
+        if jnp.issubdtype(leaf.dtype, jnp.inexact)
+    ]
+
+    assert {leaf.dtype for leaf in float_leaves} == {jnp.dtype(jnp.bfloat16)}
 
 
 def test_checkpoint_round_trip(tmp_path):

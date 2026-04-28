@@ -19,6 +19,9 @@ model:
     d_c: 256
     d_c1: 256
     d_r: 16
+  param_dtype: "float32"
+  compute_dtype: null
+  logits_dtype: "float32"
 
 # Training configuration
 training:
@@ -32,6 +35,7 @@ training:
   max_grad_norm: 1.0
   warmup_steps: 100
   scheduler: "cosine"
+  optimizer_state_dtype: "float32"
   optimizer_groups:
     - name: "frozen"
       optimizer: "frozen"
